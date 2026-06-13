@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { supabase } from "./supabaseClient";
+import Onboarding from "./Onboarding";
 
 // ---------- helpers ----------
 const todayKey = () => {
@@ -29,7 +30,7 @@ const resizeToBase64 = (file, maxDim = 1024) =>
 const JSON_SHAPE = '{"items":[{"name":"short food name","calories":number,"protein_g":number}],"confidence":"low"|"medium"|"high","note":"one short sentence on what drives uncertainty"}';
 
 const callClaude = async (content, token) => {
-  const res = await fetch("/api/estimate", {
+  const res = await fetch("/.netlify/functions/estimate", {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
     body: JSON.stringify({ messages: [{ role: "user", content }] }),
@@ -163,7 +164,8 @@ export default function DeficitTracker({ session }) {
   const token = session.access_token;
 
   const [tab, setTab] = useState("today");
-  const [settings, setSettings] = useState({ maintenance: 2500, target: 500, goalWeight: null, presets: DEFAULT_PRESETS });
+  const [settings, setSettings] = useState({ maintenance: 2500, target: 500, goalWeight: null, presets: DEFAULT_PRESETS, onboarded: false });
+  const [showTour, setShowTour] = useState(false);
   const [day, setDay] = useState({ food: [], exercise: [] });
   const [summaries, setSummaries] = useState({});
   const [weights, setWeights] = useState({});
@@ -199,8 +201,13 @@ export default function DeficitTracker({ session }) {
             target: stRes.data.target,
             goalWeight: stRes.data.goal_weight ? Number(stRes.data.goal_weight) : null,
             presets: Array.isArray(stRes.data.presets) && stRes.data.presets.length ? stRes.data.presets : DEFAULT_PRESETS,
+            onboarded: !!stRes.data.onboarded,
           };
           setSettings(s); setMaintDraft(String(s.maintenance)); setTargetDraft(String(s.target)); setGoalDraft(s.goalWeight ? String(s.goalWeight) : "");
+          if (!s.onboarded) setShowTour(true);
+        } else {
+          // brand-new user: no settings row yet → show the tour
+          setShowTour(true);
         }
         if (daysRes.data) {
           const sums = {};
@@ -237,7 +244,7 @@ export default function DeficitTracker({ session }) {
   const persistSettings = async (s) => {
     setSettings(s);
     const { error: err } = await supabase.from("settings").upsert({
-      user_id: userId, maintenance: s.maintenance, target: s.target, goal_weight: s.goalWeight, presets: s.presets, updated_at: new Date().toISOString(),
+      user_id: userId, maintenance: s.maintenance, target: s.target, goal_weight: s.goalWeight, presets: s.presets, onboarded: s.onboarded ?? false, updated_at: new Date().toISOString(),
     });
     if (err) setError("Saving failed — settings may not have synced.");
   };
@@ -268,6 +275,11 @@ export default function DeficitTracker({ session }) {
     a.download = `deficit-export-${todayKey()}.csv`;
     a.click();
     URL.revokeObjectURL(a.href);
+  };
+
+  const finishTour = () => {
+    setShowTour(false);
+    if (!settings.onboarded) persistSettings({ ...settings, onboarded: true });
   };
 
   const applyBaseline = async (m) => {
@@ -370,8 +382,7 @@ export default function DeficitTracker({ session }) {
 
   if (!ready || splash) return <Splash />;
 
-  const rowDivider = { borderTop: "1px solid rgba(255,255,255,0.07)" };
-  const sectionLabel = (color, text) => (
+  const rowDivider = { borderTop: "1px solid rgba(255,255,255,0.07)" };  const sectionLabel = (color, text) => (
     <div style={{ ...labelStyle, color, marginBottom: 12, display: "flex", alignItems: "center", gap: 7 }}>
       <span style={{ width: 6, height: 6, borderRadius: 3, background: color, boxShadow: `0 0 6px ${color}` }} />{text}
     </div>
@@ -380,6 +391,7 @@ export default function DeficitTracker({ session }) {
   return (
     <div style={{ minHeight: "100vh", background: BG, fontFamily: "'Inter',ui-sans-serif,system-ui,sans-serif", color: T.text }}>
       <style>{GLOBAL_CSS}</style>
+      {showTour && <Onboarding onFinish={finishTour} />}
 
       <div style={{ maxWidth: tab === "board" ? 1100 : 460, margin: "0 auto", padding: "22px 16px 110px", transition: "max-width .3s" }}>
 
@@ -541,6 +553,7 @@ export default function DeficitTracker({ session }) {
 
             <button onClick={saveSettings} style={{ ...btn(GRAD_FUEL), width: "100%", marginTop: 18, boxShadow: "0 6px 20px rgba(46,124,246,0.35)" }}>Save settings</button>
             <button onClick={exportCSV} style={{ ...btn("rgba(255,255,255,0.08)", T.text), width: "100%", marginTop: 10, border: `1px solid ${T.glassBorder}` }}>⬇︎ Export all data (CSV)</button>
+            <button onClick={() => { setTab("today"); setShowTour(true); }} style={{ ...btn("rgba(255,255,255,0.08)", T.text), width: "100%", marginTop: 10, border: `1px solid ${T.glassBorder}` }}>↻ Replay the tour</button>
 
             <div style={{ marginTop: 22, paddingTop: 16, borderTop: "1px solid rgba(255,255,255,0.08)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <span style={{ fontSize: 13, color: T.sub }}>{session.user.email}</span>
