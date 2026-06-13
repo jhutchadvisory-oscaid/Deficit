@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { supabase } from "./supabaseClient";
+import { supabase, setRememberMe } from "./supabaseClient";
 
 const BG = "radial-gradient(1200px 800px at 50% -10%, #1A2740 0%, #0E1626 45%, #090E18 100%)";
 const inputStyle = {
@@ -44,6 +44,7 @@ export default function Auth() {
   const [mode, setMode] = useState("signin"); // signin | signup | forgot
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [remember, setRemember] = useState(true);
   const [msg, setMsg] = useState(null); // {type:'ok'|'err', text}
   const [busy, setBusy] = useState(false);
 
@@ -52,6 +53,7 @@ export default function Auth() {
     setBusy(true); setMsg(null);
     try {
       if (mode === "signin") {
+        setRememberMe(remember);
         const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
         if (error) setMsg({ type: "err", text: error.message });
       } else if (mode === "signup") {
@@ -86,6 +88,17 @@ export default function Auth() {
       <input style={{ ...inputStyle, marginBottom: 10 }} type="email" placeholder="Email" autoComplete="email" value={email} onChange={e => setEmail(e.target.value)} />
       {mode !== "forgot" && (
         <input style={{ ...inputStyle, marginBottom: 10 }} type="password" placeholder="Password" autoComplete={mode === "signup" ? "new-password" : "current-password"} value={password} onChange={e => setPassword(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} />
+      )}
+      {mode === "signin" && (
+        <button onClick={() => setRemember(!remember)} style={{ display: "flex", alignItems: "center", gap: 10, background: "none", border: "none", padding: "4px 2px 2px", cursor: "pointer", marginBottom: 4 }}>
+          <span style={{
+            width: 20, height: 20, borderRadius: 6, flexShrink: 0,
+            border: remember ? "none" : "1.5px solid rgba(255,255,255,0.25)",
+            background: remember ? "linear-gradient(135deg,#2E7CF6,#4DA3FF)" : "transparent",
+            display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 13, fontWeight: 700,
+          }}>{remember ? "✓" : ""}</span>
+          <span style={{ fontSize: 14, color: "#B9C2D0" }}>Keep me signed in on this device</span>
+        </button>
       )}
       <button onClick={submit} disabled={busy} style={{ ...btnStyle, opacity: busy ? 0.6 : 1, marginTop: 4 }}>
         {busy ? "One moment…" : mode === "signin" ? "Sign in" : mode === "signup" ? "Create account" : "Send reset link"}
