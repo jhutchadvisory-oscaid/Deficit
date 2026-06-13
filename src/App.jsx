@@ -395,7 +395,10 @@ export default function DeficitTracker({ session }) {  const userId = session.us
   const exercise = day.exercise.reduce((s, e) => s + e.cal, 0);
   const burn = settings.maintenance + exercise;
   const net = burn - intake;
-  const pct = burn > 0 ? Math.min(intake / burn, 1.35) : 0;
+  // eat-to-target: how many calories you can still eat and still hit your deficit target
+  const budget = Math.max(0, burn - settings.target);   // calories you may eat today to land on −target
+  const remaining = budget - intake;                     // + = still room, − = past your target budget
+  const eatPct = budget > 0 ? Math.min(intake / budget, 1.35) : 0;
   const underFuelled = exercise >= 500 && (net > 1000 || intake < burn * 0.5);
   const lastWeights = Object.keys(weights).sort();
   const latestW = lastWeights.length ? weights[lastWeights[lastWeights.length - 1]] : null;
@@ -472,14 +475,33 @@ export default function DeficitTracker({ session }) {  const userId = session.us
                 </div>
                 <Ring net={net} target={settings.target} />
               </div>
-              <div style={{ marginTop: 10 }}>
-                <div style={{ position: "relative", height: 12, borderRadius: 6, background: "rgba(255,255,255,0.07)", overflow: "hidden" }}>
-                  <div style={{ position: "absolute", inset: 0, width: `${Math.min(pct, 1) * 100}%`, background: GRAD_FUEL, transition: "width .5s cubic-bezier(.2,.7,.2,1)" }} />
-                  {pct > 1 && <div style={{ position: "absolute", top: 0, bottom: 0, left: `${(1 / pct) * 100}%`, right: 0, background: T.bad }} />}
+              <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid rgba(255,255,255,0.08)" }}>
+                <div style={{ fontSize: 13, fontWeight: 500, color: T.text, marginBottom: 8 }}>
+                  {remaining >= 0
+                    ? <>You can still eat <span style={{ color: T.good, fontWeight: 700 }}>{fmt(remaining)} kcal</span> and stay on target</>
+                    : <><span style={{ color: T.bad, fontWeight: 700 }}>{fmt(Math.abs(remaining))} kcal</span> over your target budget today</>}
                 </div>
-                <div style={{ display: "flex", justifyContent: "space-between", marginTop: 9, fontSize: 13, fontWeight: 500 }}>
-                  <span style={{ color: T.fuel }}>IN {fmt(intake)} <span style={{ color: T.sub }}>· {protein}g protein</span></span>
-                  <span style={{ color: T.burn }}>OUT {fmt(burn)} <span style={{ color: T.sub }}>({fmt(exercise)} training)</span></span>
+                <div style={{ position: "relative", height: 10, borderRadius: 5, background: "rgba(255,255,255,0.07)", overflow: "hidden" }}>
+                  <div style={{ position: "absolute", inset: 0, width: `${Math.min(eatPct, 1) * 100}%`, background: remaining >= 0 ? GRAD_FUEL : "linear-gradient(135deg,#E8431F,#FF7B42)", transition: "width .5s cubic-bezier(.2,.7,.2,1)" }} />
+                  {eatPct > 1 && <div style={{ position: "absolute", top: 0, bottom: 0, left: `${(1 / eatPct) * 100}%`, right: 0, background: T.bad }} />}
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: T.sub, marginTop: 6 }}>
+                  <span>Eaten {fmt(intake)}</span><span>Budget {fmt(budget)}</span>
+                </div>
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8, marginTop: 12 }}>
+                <div style={{ background: "rgba(255,255,255,0.05)", borderRadius: 12, padding: "11px 6px", textAlign: "center" }}>
+                  <div style={{ ...numFont, fontSize: 22, fontWeight: 700, color: T.fuel }}>{fmt(intake)}</div>
+                  <div style={{ fontSize: 11, color: T.sub, marginTop: 2 }}>Eaten</div>
+                </div>
+                <div style={{ background: "rgba(255,255,255,0.05)", borderRadius: 12, padding: "11px 6px", textAlign: "center" }}>
+                  <div style={{ ...numFont, fontSize: 22, fontWeight: 700, color: T.burn }}>{fmt(burn)}</div>
+                  <div style={{ fontSize: 11, color: T.sub, marginTop: 2 }}>Burned{exercise > 0 ? ` · ${fmt(exercise)} train` : ""}</div>
+                </div>
+                <div style={{ background: "rgba(255,255,255,0.05)", borderRadius: 12, padding: "11px 6px", textAlign: "center" }}>
+                  <div style={{ ...numFont, fontSize: 22, fontWeight: 700, color: "#B7A6FF" }}>{protein}<span style={{ fontSize: 12, color: T.sub }}>g</span></div>
+                  <div style={{ fontSize: 11, color: T.sub, marginTop: 2 }}>Protein</div>
                 </div>
               </div>
             </div>
