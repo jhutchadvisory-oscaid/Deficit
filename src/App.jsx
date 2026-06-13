@@ -16,6 +16,40 @@ const ACTIVITY_TYPES = ["Run", "Bike", "Swim", "Strength", "Walk", "Hike", "Call
 const exLabel = (x) => x.type ? x.type : (x.name || "Workout");
 const exDesc = (x) => x.type && x.name ? x.name : "";
 
+// fun "weight lost ≈ X" comparisons; picks the nicest-fitting item for the amount lost
+const LOSS_EQUIVS = [
+  { kg: 0.25, label: "a hamster 🐹" },
+  { kg: 0.4, label: "a tin of beans 🥫" },
+  { kg: 0.5, label: "a block of butter 🧈" },
+  { kg: 0.62, label: "a basketball 🏀" },
+  { kg: 0.8, label: "a litre of water 💧" },
+  { kg: 1.0, label: "a bag of sugar 🍚" },
+  { kg: 1.3, label: "a human brain 🧠" },
+  { kg: 1.5, label: "a Chihuahua 🐕" },
+  { kg: 2.0, label: "a house cat 🐈" },
+  { kg: 2.7, label: "a car tyre 🛞" },
+  { kg: 3.0, label: "a newborn baby 👶" },
+  { kg: 4.0, label: "a gallon of milk 🥛" },
+  { kg: 4.5, label: "a small bowling ball 🎳" },
+  { kg: 5.0, label: "a domestic cat and a half 🐈" },
+  { kg: 6.0, label: "a Dachshund 🐕" },
+  { kg: 7.0, label: "a bowling ball 🎳" },
+  { kg: 9.0, label: "a car tyre and rim 🛞" },
+  { kg: 10.0, label: "a small microwave 📦" },
+  { kg: 12.0, label: "a full beer keg 🍺" },
+  { kg: 15.0, label: "a Border Collie 🐕" },
+  { kg: 20.0, label: "a loaded carry-on suitcase 🧳" },
+  { kg: 25.0, label: "a bag of cement 🧱" },
+];
+const lossEquiv = (kg) => {
+  if (kg <= 0) return null;
+  let best = LOSS_EQUIVS[0];
+  for (const e of LOSS_EQUIVS) if (e.kg <= kg) best = e; else break;
+  const mult = kg / best.kg;
+  const count = mult >= 1.6 ? Math.round(mult) : null;
+  return count && count > 1 ? `${count}× ${best.label}` : best.label;
+};
+
 const DEFAULT_PRESETS = [  { id: "p1", name: "Huel breakfast", cal: 200, pro: 20 },
   { id: "p2", name: "Lunch sandwich", cal: 400, pro: 18 },
   { id: "p3", name: "Huel Hot & Savoury", cal: 387, pro: 24 },
@@ -156,9 +190,10 @@ export default function DeficitTracker({ session }) {  const userId = session.us
   const isDesktop = useIsDesktop();
 
   const [tab, setTab] = useState("today");
-  const [settings, setSettings] = useState({ maintenance: 2500, target: 500, goalWeight: null, presets: DEFAULT_PRESETS, onboarded: false });
+  const [settings, setSettings] = useState({ maintenance: 2500, target: 500, goalWeight: null, proteinGoal: 0, waterGoal: 8, presets: DEFAULT_PRESETS, onboarded: false });
   const [showTour, setShowTour] = useState(false);
   const [day, setDay] = useState({ food: [], exercise: [] });
+  const [water, setWater] = useState(0);
   const [summaries, setSummaries] = useState({});
   const [weights, setWeights] = useState({});
   const [ready, setReady] = useState(false);
@@ -170,6 +205,8 @@ export default function DeficitTracker({ session }) {  const userId = session.us
   const [maintDraft, setMaintDraft] = useState("2500");
   const [targetDraft, setTargetDraft] = useState("500");
   const [goalDraft, setGoalDraft] = useState("");
+  const [proteinGoalDraft, setProteinGoalDraft] = useState("");
+  const [waterGoalDraft, setWaterGoalDraft] = useState("");
   const date = todayKey();
 
   // ---------- load from Supabase ----------
@@ -179,9 +216,9 @@ export default function DeficitTracker({ session }) {  const userId = session.us
       try {
         const [stRes, daysRes, wRes, todayRes] = await Promise.all([
           supabase.from("settings").select("*").eq("user_id", userId).maybeSingle(),
-          supabase.from("days").select("date,intake,protein,training,maintenance").eq("user_id", userId),
+          supabase.from("days").select("date,intake,protein,training,maintenance,water").eq("user_id", userId),
           supabase.from("weights").select("date,kg").eq("user_id", userId),
-          supabase.from("days").select("entries").eq("user_id", userId).eq("date", date).maybeSingle(),
+          supabase.from("days").select("entries,water").eq("user_id", userId).eq("date", date).maybeSingle(),
         ]);
         const seenLocally = (() => { try { return window.localStorage.getItem(`deficit.onboarded.${userId}`) === "1"; } catch { return false; } })();
         if (stRes.data) {
@@ -189,10 +226,13 @@ export default function DeficitTracker({ session }) {  const userId = session.us
             maintenance: stRes.data.maintenance,
             target: stRes.data.target,
             goalWeight: stRes.data.goal_weight ? Number(stRes.data.goal_weight) : null,
+            proteinGoal: stRes.data.protein_goal || 0,
+            waterGoal: stRes.data.water_goal || 8,
             presets: Array.isArray(stRes.data.presets) && stRes.data.presets.length ? stRes.data.presets : DEFAULT_PRESETS,
             onboarded: !!stRes.data.onboarded,
           };
           setSettings(s); setMaintDraft(String(s.maintenance)); setTargetDraft(String(s.target)); setGoalDraft(s.goalWeight ? String(s.goalWeight) : "");
+          setProteinGoalDraft(s.proteinGoal ? String(s.proteinGoal) : ""); setWaterGoalDraft(String(s.waterGoal));
           if (!s.onboarded && !seenLocally) setShowTour(true);
         } else if (!seenLocally) {
           // brand-new user: no settings row yet → show the tour
@@ -200,7 +240,7 @@ export default function DeficitTracker({ session }) {  const userId = session.us
         }
         if (daysRes.data) {
           const sums = {};
-          daysRes.data.forEach(r => { sums[r.date] = { in: r.intake, ex: r.training, maint: r.maintenance, pro: r.protein }; });
+          daysRes.data.forEach(r => { sums[r.date] = { in: r.intake, ex: r.training, maint: r.maintenance, pro: r.protein, water: r.water || 0 }; });
           setSummaries(sums);
         }
         if (wRes.data) {
@@ -208,7 +248,7 @@ export default function DeficitTracker({ session }) {  const userId = session.us
           wRes.data.forEach(r => { ws[r.date] = Number(r.kg); });
           setWeights(ws);
         }
-        if (todayRes.data && todayRes.data.entries) setDay(todayRes.data.entries);
+        if (todayRes.data) { if (todayRes.data.entries) setDay(todayRes.data.entries); if (todayRes.data.water) setWater(todayRes.data.water); }
       } catch {
         setError("Couldn't load your data — check your connection and refresh.");
       }
@@ -218,22 +258,28 @@ export default function DeficitTracker({ session }) {  const userId = session.us
   }, [userId]);
 
   // ---------- persistence ----------
-  const persistDay = async (newDay) => {
+  const persistDay = async (newDay, newWater = water) => {
     setDay(newDay);
     const intake = newDay.food.reduce((s, f) => s + f.cal, 0);
     const pro = newDay.food.reduce((s, f) => s + (f.pro || 0), 0);
     const exTotal = newDay.exercise.reduce((s, e) => s + e.cal, 0);
-    setSummaries({ ...summaries, [date]: { in: intake, ex: exTotal, maint: settings.maintenance, pro } });
+    setSummaries({ ...summaries, [date]: { in: intake, ex: exTotal, maint: settings.maintenance, pro, water: newWater } });
     const { error: err } = await supabase.from("days").upsert({
-      user_id: userId, date, intake, protein: pro, training: exTotal, maintenance: settings.maintenance, entries: newDay, updated_at: new Date().toISOString(),
+      user_id: userId, date, intake, protein: pro, training: exTotal, maintenance: settings.maintenance, water: newWater, entries: newDay, updated_at: new Date().toISOString(),
     });
     if (err) setError("Saving failed — your entry is shown but may not have synced.");
+  };
+
+  const setWaterGlasses = async (n) => {
+    const v = Math.max(0, n);
+    setWater(v);
+    await persistDay(day, v);
   };
 
   const persistSettings = async (s) => {
     setSettings(s);
     const { error: err } = await supabase.from("settings").upsert({
-      user_id: userId, maintenance: s.maintenance, target: s.target, goal_weight: s.goalWeight, presets: s.presets, onboarded: s.onboarded ?? false, updated_at: new Date().toISOString(),
+      user_id: userId, maintenance: s.maintenance, target: s.target, goal_weight: s.goalWeight, protein_goal: s.proteinGoal || 0, water_goal: s.waterGoal || 8, presets: s.presets, onboarded: s.onboarded ?? false, updated_at: new Date().toISOString(),
     });
     if (err) setError("Saving failed — settings may not have synced.");
   };
@@ -242,11 +288,15 @@ export default function DeficitTracker({ session }) {  const userId = session.us
     const m = parseInt(maintDraft, 10);
     const tg = parseInt(targetDraft, 10) || 0;
     const gw = goalDraft ? parseFloat(goalDraft.replace(",", ".")) : null;
+    const pg = parseInt(proteinGoalDraft, 10) || 0;
+    const wg = parseInt(waterGoalDraft, 10) || 8;
     if (!m || m < 800 || m > 6000) { setError("Enter a daily burn between 800 and 6000 kcal."); return; }
     if (tg < 0 || tg > 2000) { setError("Deficit target should be between 0 and 2000 kcal."); return; }
     if (gw !== null && (isNaN(gw) || gw < 30 || gw > 250)) { setError("Goal weight should be between 30 and 250 kg."); return; }
+    if (pg < 0 || pg > 400) { setError("Protein goal should be between 0 and 400 g."); return; }
+    if (wg < 1 || wg > 30) { setError("Water goal should be between 1 and 30 glasses."); return; }
     setError("");
-    await persistSettings({ ...settings, maintenance: m, target: tg, goalWeight: gw, presets: (settings.presets || []).filter(p => p.name.trim() && p.cal > 0) });
+    await persistSettings({ ...settings, maintenance: m, target: tg, goalWeight: gw, proteinGoal: pg, waterGoal: wg, presets: (settings.presets || []).filter(p => p.name.trim() && p.cal > 0) });
     setTab("today");
   };
 
@@ -428,8 +478,8 @@ export default function DeficitTracker({ session }) {  const userId = session.us
                   <div style={{ fontSize: 11, color: T.sub, marginTop: 2 }}>Burned{exercise > 0 ? ` · ${fmt(exercise)} train` : ""}</div>
                 </div>
                 <div style={{ background: "rgba(255,255,255,0.05)", borderRadius: 12, padding: "11px 6px", textAlign: "center" }}>
-                  <div style={{ ...numFont, fontSize: 22, fontWeight: 700, color: "#B7A6FF" }}>{protein}<span style={{ fontSize: 12, color: T.sub }}>g</span></div>
-                  <div style={{ fontSize: 11, color: T.sub, marginTop: 2 }}>Protein</div>
+                  <div style={{ ...numFont, fontSize: 22, fontWeight: 700, color: settings.proteinGoal && protein >= settings.proteinGoal ? T.good : "#B7A6FF" }}>{protein}<span style={{ fontSize: 12, color: T.sub }}>{settings.proteinGoal ? `/${settings.proteinGoal}` : ""}g</span></div>
+                  <div style={{ fontSize: 11, color: T.sub, marginTop: 2 }}>Protein{settings.proteinGoal && protein >= settings.proteinGoal ? " ✓" : ""}</div>
                 </div>
               </div>
             </div>
@@ -506,7 +556,7 @@ export default function DeficitTracker({ session }) {  const userId = session.us
             </div>
 
             {/* weight */}
-            <div className="card-in" style={{ ...cardStyle, animationDelay: ".21s", marginBottom: 0 }}>
+            <div className="card-in" style={{ ...cardStyle, animationDelay: ".21s" }}>
               {sectionLabel("#B7A6FF", "Morning weight")}
               <div style={{ fontSize: 13, color: T.sub, marginBottom: 12, marginTop: -4 }}>A few times a week, same conditions. This calibrates your true daily burn over time.</div>
               <div style={{ display: "flex", gap: 8 }}>
@@ -514,6 +564,29 @@ export default function DeficitTracker({ session }) {  const userId = session.us
                 <button onClick={logWeight} style={btn(GRAD_INK, T.text)}>Log</button>
               </div>
               {weights[date] && <div style={{ fontSize: 13, color: T.good, marginTop: 10 }}>✓ Logged {weights[date]} kg today</div>}
+            </div>
+
+            {/* water */}
+            <div className="card-in" style={{ ...cardStyle, animationDelay: ".28s", marginBottom: 0 }}>
+              {sectionLabel("#38BDF8", "Water")}
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 14 }}>
+                <div>
+                  <div style={{ ...numFont, fontSize: 30, fontWeight: 700, color: water >= settings.waterGoal ? T.good : "#38BDF8" }}>
+                    {water}<span style={{ fontSize: 15, color: T.sub }}> / {settings.waterGoal}</span>
+                  </div>
+                  <div style={{ fontSize: 12, color: T.sub, marginTop: 2 }}>glasses · {(water * 0.25).toFixed(2).replace(/\.?0+$/, "")} L{water >= settings.waterGoal ? " · goal hit ✓" : ""}</div>
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button onClick={() => setWaterGlasses(water - 1)} aria-label="Remove a glass" style={{ width: 44, height: 44, borderRadius: 12, border: `1px solid ${T.glassBorder}`, background: "rgba(255,255,255,0.05)", color: T.text, fontSize: 22, cursor: "pointer" }}>−</button>
+                  <button onClick={() => setWaterGlasses(water + 1)} aria-label="Add a glass" style={{ width: 44, height: 44, borderRadius: 12, border: "none", background: "linear-gradient(135deg,#0EA5E9,#38BDF8)", color: "#fff", fontSize: 22, cursor: "pointer", boxShadow: "0 6px 20px rgba(14,165,233,0.3)" }}>+</button>
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 5, marginTop: 14 }}>
+                {Array.from({ length: settings.waterGoal }, (_, i) => (
+                  <button key={i} onClick={() => setWaterGlasses(i + 1 === water ? i : i + 1)} aria-label={`Set ${i + 1} glasses`}
+                    style={{ flex: 1, height: 26, borderRadius: 6, border: "none", cursor: "pointer", background: i < water ? "linear-gradient(180deg,#38BDF8,#0EA5E9)" : "rgba(255,255,255,0.07)", boxShadow: i < water ? "0 0 8px rgba(56,189,248,0.4)" : "none", transition: "background .2s" }} />
+                ))}
+              </div>
             </div>
             </div>
             </div>
@@ -541,6 +614,14 @@ export default function DeficitTracker({ session }) {  const userId = session.us
             <div style={{ marginTop: 26 }}>{sectionLabel(T.sub, "Goal weight")}</div>
             <p style={{ fontSize: 14, color: T.sub, lineHeight: 1.55, marginTop: -4 }}>Optional. With weigh-ins logged, the Board projects your arrival date at the current trend.</p>
             <input style={{ ...inputStyle, fontSize: 20, ...numFont, fontWeight: 700 }} placeholder="kg" inputMode="decimal" value={goalDraft} onChange={e => setGoalDraft(e.target.value.replace(/[^\d.,]/g, ""))} />
+
+            <div style={{ marginTop: 26 }}>{sectionLabel(T.sub, "Daily protein goal")}</div>
+            <p style={{ fontSize: 14, color: T.sub, lineHeight: 1.55, marginTop: -4 }}>Optional. Shows on the Today screen and turns green when you hit it. A common target while cutting is ~1.6–2.2 g per kg bodyweight.</p>
+            <input style={{ ...inputStyle, fontSize: 20, ...numFont, fontWeight: 700 }} placeholder="grams (leave blank for none)" inputMode="numeric" value={proteinGoalDraft} onChange={e => setProteinGoalDraft(e.target.value.replace(/\D/g, ""))} />
+
+            <div style={{ marginTop: 26 }}>{sectionLabel(T.sub, "Daily water goal")}</div>
+            <p style={{ fontSize: 14, color: T.sub, lineHeight: 1.55, marginTop: -4 }}>Number of glasses (250 ml each). The default of 8 is about 2 litres.</p>
+            <input style={{ ...inputStyle, fontSize: 20, ...numFont, fontWeight: 700 }} placeholder="glasses" inputMode="numeric" value={waterGoalDraft} onChange={e => setWaterGoalDraft(e.target.value.replace(/\D/g, ""))} />
 
             <div style={{ marginTop: 26 }}>{sectionLabel(T.sub, "Preset meals")}</div>
             <p style={{ fontSize: 14, color: T.sub, lineHeight: 1.55, marginTop: -4 }}>One-tap logging on the Today screen. Name, kcal, protein (g).</p>
@@ -594,18 +675,24 @@ const RUN_DISTS = [5, 10, 15, 21.1, 25, 30];
 const BIKE_DISTS = [20, 30, 40, 50, 60, 80, 100];
 const PACES = { run: { easy: 6.25, steady: 5.5, hard: 4.75 }, bike: { easy: 25, steady: 28, hard: 32 } };
 
+// decimal minutes-per-km <-> "m:ss" string
+const decToPace = (dec) => { const m = Math.floor(dec); const s = Math.round((dec - m) * 60); return `${m}:${String(s === 60 ? 0 : s).padStart(2, "0")}`; };
+const paceToDec = (str) => { const m = String(str).match(/^(\d+)[:.](\d{1,2})$/); if (m) return parseInt(m[1], 10) + parseInt(m[2].padEnd(2, "0").slice(0, 2), 10) / 60; const f = parseFloat(str); return isNaN(f) ? null : f; };
+
 function FuelPlan({ latestW, target }) {
   const [sport, setSport] = useState("run");
   const [dist, setDist] = useState(10);
   const [effort, setEffort] = useState("steady");
-  const [pace, setPace] = useState(String(PACES.run.steady));
+  const [runPace, setRunPace] = useState(decToPace(PACES.run.steady)); // "5:30" string
+  const [bikeSpeed, setBikeSpeed] = useState(String(PACES.bike.steady)); // km/h string
 
-  const setSportAnd = (s) => { setSport(s); setDist(s === "run" ? 10 : 40); setPace(String(PACES[s][effort])); };
-  const setEffortAnd = (e) => { setEffort(e); setPace(String(PACES[sport][e])); };
+  const setSportAnd = (s) => { setSport(s); setDist(s === "run" ? 10 : 40); if (s === "run") setRunPace(decToPace(PACES.run[effort])); else setBikeSpeed(String(PACES.bike[effort])); };
+  const setEffortAnd = (e) => { setEffort(e); if (sport === "run") setRunPace(decToPace(PACES.run[e])); else setBikeSpeed(String(PACES.bike[e])); };
 
   const kg = latestW || 75;
-  const paceNum = parseFloat(pace) || PACES[sport][effort];
-  const durationHr = sport === "run" ? (dist * paceNum) / 60 : dist / paceNum;
+  const paceDec = sport === "run" ? (paceToDec(runPace) || PACES.run[effort]) : null;
+  const speed = sport === "bike" ? (parseFloat(bikeSpeed) || PACES.bike[effort]) : null;
+  const durationHr = sport === "run" ? (dist * paceDec) / 60 : dist / speed;
   const durMin = Math.round(durationHr * 60);
   const burn = Math.round(sport === "run" ? dist * kg * 1.0 : durationHr * (effort === "easy" ? 540 : effort === "steady" ? 660 : 820) * (kg / 75));
 
@@ -653,7 +740,14 @@ function FuelPlan({ latestW, target }) {
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <span style={{ fontSize: 13, color: T.sub, flexShrink: 0 }}>{sport === "run" ? "Pace (min/km)" : "Speed (km/h)"}</span>
-          <input style={{ ...inputStyle, width: 90, ...numFont, fontWeight: 700 }} inputMode="decimal" value={pace} onChange={e => setPace(e.target.value.replace(/[^\d.,]/g, "").replace(",", "."))} />
+          {sport === "run" ? (
+            <input style={{ ...inputStyle, width: 90, ...numFont, fontWeight: 700 }} inputMode="numeric" placeholder="5:30" value={runPace}
+              onChange={e => setRunPace(e.target.value.replace(/[^\d:]/g, ""))}
+              onBlur={() => { const d = paceToDec(runPace); if (d) setRunPace(decToPace(d)); }} />
+          ) : (
+            <input style={{ ...inputStyle, width: 90, ...numFont, fontWeight: 700 }} inputMode="decimal" value={bikeSpeed}
+              onChange={e => setBikeSpeed(e.target.value.replace(/[^\d.,]/g, "").replace(",", "."))} />
+          )}
           <span style={{ fontSize: 13, color: T.sub }}>≈ {Math.floor(durMin / 60) > 0 ? `${Math.floor(durMin / 60)}h ` : ""}{durMin % 60}min · ~{fmt(burn)} kcal</span>
         </div>
       </div>
@@ -749,6 +843,27 @@ function Board({ summaries, weights, settings, net, protein, exercise, fetchDay 
     else break;
   }
 
+  // this calendar week, Monday → Sunday
+  const wkMon = new Date();
+  wkMon.setHours(0, 0, 0, 0);
+  wkMon.setDate(wkMon.getDate() - ((wkMon.getDay() + 6) % 7)); // back to Monday
+  const wk = { in: 0, out: 0, net: 0, daysLogged: 0, daysElapsed: 0, hit: 0 };
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(wkMon); d.setDate(wkMon.getDate() + i);
+    if (d > new Date()) break;
+    wk.daysElapsed++;
+    const s = summaries[keyFor(d)];
+    if (s) {
+      wk.daysLogged++;
+      const out = (s.maint || settings.maintenance) + s.ex;
+      wk.in += s.in; wk.out += out; wk.net += out - s.in;
+      if (out - s.in >= settings.target) wk.hit++;
+    }
+  }
+  const wkTarget = settings.target * wk.daysElapsed;      // target deficit for the week so far
+  const wkAvg = wk.daysLogged ? wk.net / wk.daysLogged : null;
+  const wkVsTarget = wk.net - wkTarget;                    // + = ahead of target, − = behind
+
   const wKeys = Object.keys(weights).sort();
   const startW = wKeys.length ? weights[wKeys[0]] : null;
   const latestW = wKeys.length ? weights[wKeys[wKeys.length - 1]] : null;
@@ -837,6 +952,48 @@ function Board({ summaries, weights, settings, net, protein, exercise, fetchDay 
           <div style={subLine}>{startW && latestW && wKeys.length > 1 ? `${startW - latestW >= 0 ? "−" : "+"}${Math.abs(startW - latestW).toFixed(1)} kg since ${new Date(wKeys[0] + "T12:00:00").toLocaleDateString([], { day: "numeric", month: "short" })}` : "Log weigh-ins on Today"}</div>
         </div>
       </div>
+
+      {wk.daysLogged > 0 && (
+        <div className="card-in" style={{ ...cardStyle, animationDelay: ".26s" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 14 }}>
+            <div style={{ ...labelStyle, color: T.sub }}>This week · Mon–Sun</div>
+            <div style={{ fontSize: 12, color: T.sub }}>{wkMon.toLocaleDateString([], { day: "numeric", month: "short" })} – today · {wk.daysLogged}/{wk.daysElapsed} logged</div>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, marginBottom: 14 }}>
+            <div>
+              <div style={{ ...numFont, fontSize: 26, fontWeight: 700, color: T.fuel }}>{fmt(wk.in)}</div>
+              <div style={{ fontSize: 11, color: T.sub, marginTop: 2 }}>Eaten this week</div>
+            </div>
+            <div>
+              <div style={{ ...numFont, fontSize: 26, fontWeight: 700, color: T.burn }}>{fmt(wk.out)}</div>
+              <div style={{ fontSize: 11, color: T.sub, marginTop: 2 }}>Burned this week</div>
+            </div>
+            <div>
+              <div style={{ ...numFont, fontSize: 26, fontWeight: 700, color: wk.net >= 0 ? T.good : T.bad }}>{wk.net >= 0 ? "−" : "+"}{fmt(Math.abs(wk.net))}</div>
+              <div style={{ fontSize: 11, color: T.sub, marginTop: 2 }}>Net deficit</div>
+            </div>
+          </div>
+          {/* progress vs the week's running target */}
+          <div style={{ position: "relative", height: 10, borderRadius: 5, background: "rgba(255,255,255,0.07)", overflow: "hidden" }}>
+            <div style={{ position: "absolute", inset: 0, width: `${wkTarget > 0 ? Math.min(Math.max(wk.net / wkTarget, 0), 1) * 100 : (wk.net > 0 ? 100 : 0)}%`, background: wkVsTarget >= 0 ? "linear-gradient(90deg,#3DDC84,#4DD7C8)" : GRAD_FUEL, boxShadow: wkVsTarget >= 0 ? "0 0 10px rgba(61,220,132,0.45)" : "none", transition: "width .5s" }} />
+          </div>
+          <div style={{ fontSize: 13.5, color: T.sub, marginTop: 10, lineHeight: 1.5 }}>
+            {wkVsTarget >= 0
+              ? <><strong style={{ color: T.good }}>{fmt(wkVsTarget)} kcal ahead</strong> of your weekly target so far — a heavy day won't undo the week.</>
+              : (() => { const daysLeft = Math.max(0, 7 - wk.daysElapsed); return <><strong style={{ color: T.amber }}>{fmt(Math.abs(wkVsTarget))} kcal behind</strong> your weekly target{daysLeft > 0 ? <> — about {fmt(Math.abs(wkVsTarget) / daysLeft)} kcal/day extra over the {daysLeft} day{daysLeft === 1 ? "" : "s"} left to catch up.</> : <> — make it up next week.</>}</>; })()}
+            {wkAvg != null && <> Daily average: <strong style={{ color: T.text }}>{wkAvg >= 0 ? "−" : "+"}{fmt(Math.abs(wkAvg))} kcal</strong> vs your −{settings.target} target.</>}
+          </div>
+        </div>
+      )}
+
+      {startW && latestW && startW - latestW >= 0.25 && (
+        <div className="card-in" style={{ ...cardStyle, animationDelay: ".28s", background: "linear-gradient(160deg, rgba(61,220,132,0.10), rgba(255,255,255,0.03) 60%)" }}>
+          <div style={{ ...labelStyle, color: T.good, marginBottom: 8 }}>Weight lost so far</div>
+          <div style={{ fontSize: 16, lineHeight: 1.5, color: T.text }}>
+            You've lost <strong style={{ color: T.good }}>{(startW - latestW).toFixed(1)} kg</strong> — that's about the weight of <strong>{lossEquiv(startW - latestW)}</strong>.
+          </div>
+        </div>
+      )}
 
       {/* interactive chart */}
       <div className="card-in" style={{ ...cardStyle, animationDelay: ".3s" }}>
