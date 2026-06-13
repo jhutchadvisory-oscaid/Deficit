@@ -65,14 +65,16 @@ export default function Onboarding({ onFinish }) {
   // coach marks: dim screen, highlight one dock tab, point a bubble at it
   const step = COACH[c];
   const tabIndex = TABS.indexOf(step.tab);
-  const leftPct = ((tabIndex + 0.5) / TABS.length) * 100;
+  const rawLeft = ((tabIndex + 0.5) / TABS.length) * 100;
+  const bubbleLeft = Math.min(Math.max(rawLeft, 26), 74); // keep bubble on-screen
+  const arrowLeft = `${rawLeft - bubbleLeft + 50}%`;        // arrow still points at the tab
 
   return (
     <div style={{ ...overlay, background: "rgba(5,8,14,0.82)", backdropFilter: "blur(2px)" }}>
       <style>{`@keyframes pop{from{opacity:0;transform:translate(-50%,8px)}to{opacity:1;transform:translate(-50%,0)}}@keyframes glowPulse{0%,100%{box-shadow:0 0 0 2px rgba(255,107,53,0.6),0 0 18px rgba(255,107,53,0.5)}50%{box-shadow:0 0 0 2px rgba(255,107,53,0.9),0 0 28px rgba(255,107,53,0.8)}}`}</style>
 
       {/* bubble */}
-      <div key={c} style={{ position: "fixed", bottom: 92, left: `${leftPct}%`, transform: "translateX(-50%)", width: "min(300px, 82vw)", background: "#141D2E", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 18, padding: 18, boxShadow: "0 12px 40px rgba(0,0,0,0.5)", animation: "pop .35s cubic-bezier(.2,.7,.2,1) both" }}>
+      <div key={c} style={{ position: "fixed", bottom: 92, left: `${bubbleLeft}%`, transform: "translateX(-50%)", width: "min(320px, 88vw)", boxSizing: "border-box", background: "#141D2E", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 18, padding: 18, boxShadow: "0 12px 40px rgba(0,0,0,0.5)", animation: "pop .35s cubic-bezier(.2,.7,.2,1) both" }}>
         <div style={{ fontSize: 11, letterSpacing: "0.16em", textTransform: "uppercase", fontWeight: 700, color: T.burn, marginBottom: 8 }}>{step.tab} · {c + 1} of {COACH.length}</div>
         <div style={{ fontSize: 15, lineHeight: 1.55, color: T.text, marginBottom: 14 }}>{step.text}</div>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -83,7 +85,7 @@ export default function Onboarding({ onFinish }) {
           </button>
         </div>
         {/* pointer */}
-        <div style={{ position: "absolute", bottom: -8, left: "50%", transform: "translateX(-50%) rotate(45deg)", width: 16, height: 16, background: "#141D2E", borderRight: "1px solid rgba(255,255,255,0.12)", borderBottom: "1px solid rgba(255,255,255,0.12)" }} />
+        <div style={{ position: "absolute", bottom: -8, left: arrowLeft, transform: "translateX(-50%) rotate(45deg)", width: 16, height: 16, background: "#141D2E", borderRight: "1px solid rgba(255,255,255,0.12)", borderBottom: "1px solid rgba(255,255,255,0.12)" }} />
       </div>
 
       {/* highlight ring over the live dock tab */}
