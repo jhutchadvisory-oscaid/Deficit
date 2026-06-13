@@ -575,7 +575,7 @@ export default function DeficitTracker({ session }) {  const userId = session.us
 
         {tab === "history" && <History summaries={summaries} maintenance={settings.maintenance} weights={weights} onApplyBaseline={applyBaseline} fetchDay={fetchDay} />}
 
-        {tab === "board" && <Board summaries={summaries} weights={weights} settings={settings} net={net} protein={protein} exercise={exercise} />}
+        {tab === "board" && <Board summaries={summaries} weights={weights} settings={settings} net={net} protein={protein} exercise={exercise} fetchDay={fetchDay} />}
 
         {tab === "fuel" && <FuelPlan latestW={latestW} target={settings.target} />}
 
@@ -776,27 +776,49 @@ function FuelPlan({ latestW, target }) {
   );
 }
 
-// ---------- board: full-stats dashboard ----------
-function Board({ summaries, weights, settings, net, protein, exercise }) {
-  const keyFor = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  const lastN = (n) => {
-    const arr = [];
-    for (let i = n - 1; i >= 0; i--) {
-      const d = new Date(); d.setDate(d.getDate() - i);
-      const key = keyFor(d);
-      const s = summaries[key];
-      arr.push({ key, d, s, net: s ? (s.maint || settings.maintenance) + s.ex - s.in : null });
-    }
-    return arr;
-  };
+// ---------- board: interactive dashboard ----------
+const METRICS = {
+  net:      { label: "Net balance", unit: "kcal", type: "bar",  color: null },
+  intake:   { label: "Calories in", unit: "kcal", type: "line", color: "#4DA3FF" },
+  training: { label: "Training",    unit: "kcal", type: "bar",  color: "#FF6B35" },
+  protein:  { label: "Protein",     unit: "g",    type: "line", color: "#B7A6FF" },
+  weight:   { label: "Weight",      unit: "kg",   type: "line", color: "#3DDC84" },
+};
+const RANGES = [[7, "7d"], [14, "14d"], [30, "30d"], [90, "90d"]];
 
-  const last7 = lastN(7), last30 = lastN(30);
+function Board({ summaries, weights, settings, net, protein, exercise, fetchDay }) {
+  const [metric, setMetric] = useState("net");
+  const [range, setRange] = useState(30);
+  const [hover, setHover] = useState(null);   // index into series
+  const [sel, setSel] = useState(null);       // { key, loading, data }
+
+  const keyFor = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+  // build the day series for the chosen range
+  const series = [];
+  for (let i = range - 1; i >= 0; i--) {
+    const d = new Date(); d.setDate(d.getDate() - i);
+    const key = keyFor(d);
+    const s = summaries[key];
+    series.push({
+      key, d, s,
+      net: s ? (s.maint || settings.maintenance) + s.ex - s.in : null,
+      intake: s ? s.in : null,
+      training: s ? s.ex : null,
+      protein: s ? (s.pro || 0) : null,
+      weight: weights[key] != null ? weights[key] : null,
+    });
+  }
+
+  // KPI helpers (always 7-day regardless of chart range)
+  const last7 = series.slice(-7).length >= 7 ? series.slice(-7) : (() => {
+    const a = []; for (let i = 6; i >= 0; i--) { const d = new Date(); d.setDate(d.getDate() - i); const k = keyFor(d); const s = summaries[k]; a.push({ s, net: s ? (s.maint || settings.maintenance) + s.ex - s.in : null }); } return a;
+  })();
   const logged7 = last7.filter(x => x.s);
   const avg7 = logged7.length ? logged7.reduce((a, x) => a + x.net, 0) / logged7.length : null;
   const pro7 = logged7.length ? Math.round(logged7.reduce((a, x) => a + (x.s.pro || 0), 0) / logged7.length) : null;
   const train7 = last7.reduce((a, x) => a + (x.s ? x.s.ex : 0), 0);
   const trainDays7 = last7.filter(x => x.s && x.s.ex > 0).length;
-  const maxAbs30 = Math.max(400, ...last30.filter(x => x.s).map(x => Math.abs(x.net)));
 
   let streak = 0;
   for (let i = 0; i < 365; i++) {
@@ -820,113 +842,235 @@ function Board({ summaries, weights, settings, net, protein, exercise }) {
   const pctDone = goal && startW && latestW && startW > goal ? Math.min(100, Math.max(0, ((startW - latestW) / (startW - goal)) * 100)) : null;
   const eta = toGo !== null && toGo > 0 && ratePerDay && ratePerDay > 0 ? new Date(Date.now() + (toGo / ratePerDay) * 86400000) : null;
 
+  const openDay = async (key) => {
+    setSel({ key, loading: true, data: null });
+    try { const data = await fetchDay(key); setSel({ key, loading: false, data }); }
+    catch { setSel({ key, loading: false, data: null }); }
+  };
+
   const tile = { ...cardStyle, marginBottom: 0, padding: 18 };
   const tLabel = { ...labelStyle, color: T.sub, marginBottom: 10 };
-  const big = (color) => ({ ...numFont, fontSize: 40, fontWeight: 700, lineHeight: 1, color });
+  const big = (color) => ({ ...numFont, fontSize: 38, fontWeight: 700, lineHeight: 1, color });
   const subLine = { fontSize: 12.5, color: T.sub, marginTop: 8, lineHeight: 1.45 };
+  const kpiClick = (m) => ({ cursor: "pointer", outline: metric === m ? `1px solid ${T.glassBorder}` : "none" });
+
+  // ---- chart geometry ----
+  const cfg = METRICS[metric];
+  const vals = series.map(x => x[metric]);
+  const present = series.filter(x => x[metric] != null);
+  const hasData = present.length > 0;
+
+  // value scale
+  let lo = 0, hi = 1;
+  if (hasData) {
+    const nums = present.map(x => x[metric]);
+    if (metric === "net") { const m = Math.max(400, ...nums.map(Math.abs)); lo = -m; hi = m; }
+    else if (metric === "weight") { lo = Math.min(...nums) - 0.5; hi = Math.max(...nums) + 0.5; if (goal) lo = Math.min(lo, goal - 0.5); }
+    else { lo = 0; hi = Math.max(...nums) * 1.15 || 1; }
+  }
+  const W = 1000, H = 320, padX = 8, padTop = 14, padBot = 26;
+  const plotW = W - padX * 2, plotH = H - padTop - padBot;
+  const xAt = (i) => padX + (series.length === 1 ? plotW / 2 : (i / (series.length - 1)) * plotW);
+  const yAt = (v) => padTop + (1 - (v - lo) / (hi - lo || 1)) * plotH;
+  const zeroY = yAt(0);
+  const colorFor = (x) => metric === "net" ? (x.net >= 0 ? T.good : T.bad) : cfg.color;
+
+  // line path for line metrics (skip gaps)
+  const linePts = series.map((x, i) => x[metric] != null ? `${xAt(i)},${yAt(x[metric])}` : null).filter(Boolean).join(" ");
+
+  const hv = hover != null ? series[hover] : null;
+  const avgRange = present.length ? present.reduce((a, x) => a + x[metric], 0) / present.length : null;
 
   return (
     <>
-      <div className="card-in" style={{ ...labelStyle, color: T.sub, marginBottom: 12 }}>The Board · rotate landscape for the full spread</div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
+      <div className="card-in" style={{ ...labelStyle, color: T.sub, marginBottom: 12 }}>The Board · tap any day for its breakdown</div>
 
-        <div className="card-in" style={tile}>
+      {/* KPI tiles — tap to switch the chart metric */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 12, marginBottom: 14 }}>
+        <div className="card-in" style={{ ...tile, ...kpiClick("net") }} onClick={() => setMetric("net")}>
           <div style={tLabel}>Today</div>
           <div style={big(net >= 0 ? T.good : T.bad)}>{net >= 0 ? "−" : "+"}{fmt(Math.abs(net))}</div>
-          <div style={subLine}>{net >= settings.target ? "Target hit ✓" : net >= 0 ? `${fmt(settings.target - net)} kcal to target` : "Over budget"} · {fmt(exercise)} training · {protein}g protein</div>
+          <div style={subLine}>{net >= settings.target ? "Target hit ✓" : net >= 0 ? `${fmt(settings.target - net)} to target` : "Over budget"} · {fmt(exercise)} training · {protein}g</div>
         </div>
-
-        <div className="card-in" style={{ ...tile, animationDelay: ".05s" }}>
+        <div className="card-in" style={{ ...tile, ...kpiClick("net"), animationDelay: ".05s" }} onClick={() => setMetric("net")}>
           <div style={tLabel}>7-day average</div>
           <div style={big(avg7 === null ? T.faint : avg7 >= 0 ? T.good : T.bad)}>{avg7 === null ? "—" : `${avg7 >= 0 ? "−" : "+"}${fmt(Math.abs(avg7))}`}</div>
-          <div style={subLine}>{avg7 === null ? "No days logged this week" : avg7 >= settings.target ? `Ahead of your −${settings.target} target` : `${fmt(settings.target - avg7)} kcal/day off your −${settings.target} target`}</div>
+          <div style={subLine}>{avg7 === null ? "No days logged this week" : avg7 >= settings.target ? `Ahead of your −${settings.target} target` : `${fmt(settings.target - avg7)}/day off target`}</div>
         </div>
-
         <div className="card-in" style={{ ...tile, animationDelay: ".1s" }}>
           <div style={tLabel}>Streak</div>
-          <div style={big(streak > 0 ? T.amber : T.faint)}>{streak}<span style={{ fontSize: 18, color: T.sub, marginLeft: 6 }}>day{streak === 1 ? "" : "s"}</span></div>
-          <div style={subLine}>Consecutive days hitting your deficit target</div>
+          <div style={big(streak > 0 ? T.amber : T.faint)}>{streak}<span style={{ fontSize: 17, color: T.sub, marginLeft: 6 }}>day{streak === 1 ? "" : "s"}</span></div>
+          <div style={subLine}>Consecutive days hitting target</div>
         </div>
-
-        <div className="card-in" style={{ ...tile, animationDelay: ".15s" }}>
+        <div className="card-in" style={{ ...tile, ...kpiClick("protein"), animationDelay: ".15s" }} onClick={() => setMetric("protein")}>
           <div style={tLabel}>Protein</div>
-          <div style={big(pro7 === null ? T.faint : T.fuel)}>{pro7 === null ? "—" : pro7}<span style={{ fontSize: 18, color: T.sub, marginLeft: 6 }}>g/day</span></div>
-          <div style={subLine}>7-day average. Aim high while cutting to protect muscle.</div>
+          <div style={big(pro7 === null ? T.faint : T.fuel)}>{pro7 === null ? "—" : pro7}<span style={{ fontSize: 17, color: T.sub, marginLeft: 6 }}>g/day</span></div>
+          <div style={subLine}>7-day average. Keep it high while cutting.</div>
         </div>
-
-        <div className="card-in" style={{ ...tile, animationDelay: ".2s" }}>
+        <div className="card-in" style={{ ...tile, ...kpiClick("training"), animationDelay: ".2s" }} onClick={() => setMetric("training")}>
           <div style={tLabel}>Training · 7 days</div>
-          <div style={big(T.burn)}>{fmt(train7)}<span style={{ fontSize: 18, color: T.sub, marginLeft: 6 }}>kcal</span></div>
+          <div style={big(T.burn)}>{fmt(train7)}<span style={{ fontSize: 17, color: T.sub, marginLeft: 6 }}>kcal</span></div>
           <div style={subLine}>{trainDays7} active day{trainDays7 === 1 ? "" : "s"} this week</div>
         </div>
-
-        <div className="card-in" style={{ ...tile, animationDelay: ".25s" }}>
+        <div className="card-in" style={{ ...tile, ...kpiClick("weight"), animationDelay: ".25s" }} onClick={() => setMetric("weight")}>
           <div style={tLabel}>Weight</div>
-          <div style={big(latestW ? "#B7A6FF" : T.faint)}>{latestW ? latestW : "—"}<span style={{ fontSize: 18, color: T.sub, marginLeft: 6 }}>kg</span></div>
-          <div style={subLine}>{startW && latestW && wKeys.length > 1 ? `${startW - latestW >= 0 ? "−" : "+"}${Math.abs(startW - latestW).toFixed(1)} kg since ${new Date(wKeys[0] + "T12:00:00").toLocaleDateString([], { day: "numeric", month: "short" })}` : "Log weigh-ins on the Today screen"}</div>
+          <div style={big(latestW ? "#B7A6FF" : T.faint)}>{latestW ? latestW : "—"}<span style={{ fontSize: 17, color: T.sub, marginLeft: 6 }}>kg</span></div>
+          <div style={subLine}>{startW && latestW && wKeys.length > 1 ? `${startW - latestW >= 0 ? "−" : "+"}${Math.abs(startW - latestW).toFixed(1)} kg since ${new Date(wKeys[0] + "T12:00:00").toLocaleDateString([], { day: "numeric", month: "short" })}` : "Log weigh-ins on Today"}</div>
+        </div>
+      </div>
+
+      {/* interactive chart */}
+      <div className="card-in" style={{ ...cardStyle, animationDelay: ".3s" }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 10, justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {Object.keys(METRICS).map(m => (
+              <button key={m} onClick={() => { setMetric(m); setHover(null); }}
+                style={{ padding: "7px 13px", borderRadius: 999, border: metric === m ? `1px solid ${METRICS[m].color || T.good}` : `1px solid ${T.glassBorder}`, background: metric === m ? `${METRICS[m].color || T.good}22` : "rgba(255,255,255,0.04)", color: metric === m ? (METRICS[m].color || T.good) : T.sub, fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+                {METRICS[m].label}
+              </button>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 6 }}>
+            {RANGES.map(([n, lbl]) => (
+              <button key={n} onClick={() => { setRange(n); setHover(null); }}
+                style={{ padding: "7px 12px", borderRadius: 999, border: "none", background: range === n ? "linear-gradient(135deg,#E8431F,#FF7B42)" : "rgba(255,255,255,0.05)", color: range === n ? "#fff" : T.sub, fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+                {lbl}
+              </button>
+            ))}
+          </div>
         </div>
 
-        <div className="card-in" style={{ ...tile, gridColumn: "1 / -1", animationDelay: ".3s" }}>
-          <div style={tLabel}>Goal projection</div>
-          {!goal ? (
-            <div style={{ fontSize: 14, color: T.sub }}>Set a goal weight in Setup and the Board will project your arrival date from your actual trend.</div>
-          ) : !latestW ? (
-            <div style={{ fontSize: 14, color: T.sub }}>Goal set at <strong style={{ color: T.text }}>{goal} kg</strong> — log a weigh-in to start the projection.</div>
-          ) : toGo <= 0 ? (
-            <div style={{ ...numFont, fontSize: 30, fontWeight: 700, color: T.good }}>Goal reached — {latestW} kg 🏁</div>
-          ) : (
+        {/* readout line */}
+        <div style={{ display: "flex", alignItems: "baseline", gap: 12, minHeight: 30, marginBottom: 4 }}>
+          {hv && hv[metric] != null ? (
             <>
-              <div style={{ display: "flex", flexWrap: "wrap", alignItems: "baseline", gap: "6px 22px" }}>
-                <div style={big(T.good)}>{eta ? eta.toLocaleDateString([], { day: "numeric", month: "long" }) : "—"}</div>
-                <div style={{ fontSize: 14, color: T.sub }}>
-                  {eta ? `projected at your current rate (${(ratePerDay * 7).toFixed(2)} kg/week)` : "no downward trend yet — string some deficit days together"}
-                  {" · "}<strong style={{ color: T.text }}>{toGo} kg to go</strong>
-                </div>
-              </div>
-              {pctDone !== null && (
-                <div style={{ marginTop: 14 }}>
-                  <div style={{ position: "relative", height: 12, borderRadius: 6, background: "rgba(255,255,255,0.07)", overflow: "hidden" }}>
-                    <div style={{ position: "absolute", inset: 0, width: `${pctDone}%`, background: "linear-gradient(90deg,#3DDC84,#4DD7C8)", boxShadow: "0 0 12px rgba(61,220,132,0.5)", transition: "width .6s" }} />
-                  </div>
-                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: T.sub, marginTop: 7 }}>
-                    <span>Start {startW} kg</span>
-                    <span style={{ color: T.text, fontWeight: 600 }}>{Math.round(pctDone)}% there</span>
-                    <span>Goal {goal} kg</span>
-                  </div>
-                </div>
-              )}
+              <span style={{ ...numFont, fontSize: 26, fontWeight: 700, color: colorFor(hv) }}>
+                {metric === "net" ? (hv.net >= 0 ? "−" : "+") : ""}{metric === "weight" ? hv.weight : fmt(Math.abs(hv[metric]))}<span style={{ fontSize: 14, color: T.sub, marginLeft: 4 }}>{cfg.unit}</span>
+              </span>
+              <span style={{ fontSize: 14, color: T.sub }}>{hv.d.toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" })}</span>
             </>
+          ) : (
+            <span style={{ fontSize: 14, color: T.sub }}>
+              {avgRange != null ? <>Average over {range} days: <strong style={{ color: T.text }}>{metric === "net" ? (avgRange >= 0 ? "−" : "+") : ""}{metric === "weight" ? avgRange.toFixed(1) : fmt(Math.abs(avgRange))} {cfg.unit}</strong> · tap a day for detail</> : "No data in this range yet"}
+            </span>
           )}
         </div>
 
-        <div className="card-in" style={{ ...tile, gridColumn: "1 / -1", animationDelay: ".35s" }}>
-          <div style={tLabel}>30-day balance</div>
-          {last30.filter(x => x.s).length === 0 ? (
-            <p style={{ fontSize: 14, color: T.sub, margin: 0 }}>Nothing logged in the last 30 days yet.</p>
-          ) : (
-            <>
-              <div style={{ display: "flex", alignItems: "center", height: 130, gap: 2 }}>
-                {last30.map(x => (
-                  <div key={x.key} style={{ flex: 1, height: "100%", position: "relative" }} title={x.s ? `${x.key}: ${x.net >= 0 ? "−" : "+"}${Math.abs(Math.round(x.net))}` : x.key}>
-                    <div style={{ position: "absolute", top: "50%", left: 0, right: 0, height: 1, background: "rgba(255,255,255,0.08)" }} />
-                    {x.s && (
-                      <div style={{
-                        position: "absolute", left: "15%", right: "15%", borderRadius: 2,
-                        background: x.net >= 0 ? T.good : T.bad,
-                        height: `${Math.min(Math.abs(x.net) / maxAbs30, 1) * 47}%`,
-                        ...(x.net >= 0 ? { bottom: "50%" } : { top: "50%" })
-                      }} />
-                    )}
-                  </div>
-                ))}
-              </div>
-              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: T.faint, marginTop: 6 }}>
-                <span>{last30[0].d.toLocaleDateString([], { day: "numeric", month: "short" })}</span>
-                <span>Today</span>
-              </div>
-            </>
-          )}
+        {/* svg chart with overlay hit areas */}
+        <div style={{ position: "relative", width: "100%" }}>
+          <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ width: "100%", height: 240, display: "block" }}>
+            {/* target line for net */}
+            {metric === "net" && hasData && settings.target > 0 && yAt(settings.target) > padTop && yAt(settings.target) < padTop + plotH && (
+              <line x1={padX} x2={W - padX} y1={yAt(settings.target)} y2={yAt(settings.target)} stroke="rgba(61,220,132,0.4)" strokeWidth="1.5" strokeDasharray="6 6" />
+            )}
+            {/* goal line for weight */}
+            {metric === "weight" && hasData && goal && yAt(goal) > padTop && yAt(goal) < padTop + plotH && (
+              <line x1={padX} x2={W - padX} y1={yAt(goal)} y2={yAt(goal)} stroke="rgba(61,220,132,0.5)" strokeWidth="1.5" strokeDasharray="6 6" />
+            )}
+            {/* zero baseline for net */}
+            {metric === "net" && hasData && <line x1={padX} x2={W - padX} y1={zeroY} y2={zeroY} stroke="rgba(255,255,255,0.14)" strokeWidth="1" />}
+
+            {!hasData && <text x={W / 2} y={H / 2} textAnchor="middle" fill={T.faint} fontSize="20">No data in this range</text>}
+
+            {/* bars */}
+            {hasData && cfg.type === "bar" && series.map((x, i) => {
+              if (x[metric] == null) return null;
+              const v = x[metric];
+              const bw = Math.max(2, (plotW / series.length) * 0.6);
+              if (metric === "net") {
+                const y = v >= 0 ? yAt(v) : zeroY;
+                const h = Math.abs(yAt(v) - zeroY);
+                return <rect key={x.key} x={xAt(i) - bw / 2} y={y} width={bw} height={Math.max(1, h)} rx="2" fill={v >= 0 ? T.good : T.bad} opacity={hover === i ? 1 : 0.85} />;
+              }
+              const y = yAt(v), h = padTop + plotH - y;
+              return <rect key={x.key} x={xAt(i) - bw / 2} y={y} width={bw} height={Math.max(1, h)} rx="2" fill={cfg.color} opacity={hover === i ? 1 : 0.85} />;
+            })}
+
+            {/* line */}
+            {hasData && cfg.type === "line" && linePts && (
+              <>
+                <polyline points={linePts} fill="none" stroke={cfg.color} strokeWidth="2.5" vectorEffect="non-scaling-stroke" style={{ filter: `drop-shadow(0 0 5px ${cfg.color}88)` }} />
+                {series.map((x, i) => x[metric] != null ? <circle key={x.key} cx={xAt(i)} cy={yAt(x[metric])} r={hover === i ? 5 : 3} fill={hover === i ? "#fff" : cfg.color} /> : null)}
+              </>
+            )}
+
+            {/* hover guide */}
+            {hv && <line x1={xAt(hover)} x2={xAt(hover)} y1={padTop} y2={padTop + plotH} stroke="rgba(255,255,255,0.25)" strokeWidth="1" vectorEffect="non-scaling-stroke" />}
+          </svg>
+
+          {/* invisible hit columns for hover + click (works on touch) */}
+          <div style={{ position: "absolute", inset: 0, display: "flex" }}>
+            {series.map((x, i) => (
+              <button key={x.key}
+                onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)}
+                onClick={() => x.s && openDay(x.key)}
+                aria-label={x.d.toLocaleDateString()}
+                style={{ flex: 1, background: "none", border: "none", padding: 0, cursor: x.s ? "pointer" : "default" }} />
+            ))}
+          </div>
         </div>
+
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: T.faint, marginTop: 4 }}>
+          <span>{series[0].d.toLocaleDateString([], { day: "numeric", month: "short" })}</span>
+          <span>Today</span>
+        </div>
+      </div>
+
+      {/* selected-day detail */}
+      {sel && (
+        <div className="card-in" style={{ ...cardStyle }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+            <div style={{ ...labelStyle, color: T.text }}>{new Date(sel.key + "T12:00:00").toLocaleDateString([], { weekday: "long", day: "numeric", month: "long" })}</div>
+            <button onClick={() => setSel(null)} style={{ background: "none", border: "none", color: T.sub, cursor: "pointer", fontSize: 15 }}>✕</button>
+          </div>
+          {sel.loading ? <p style={{ fontSize: 14, color: T.sub, margin: 0 }}>Loading…</p>
+            : !sel.data || (sel.data.food.length === 0 && sel.data.exercise.length === 0) ? <p style={{ fontSize: 14, color: T.sub, margin: 0 }}>Nothing logged this day.{weights[sel.key] ? ` Weight: ${weights[sel.key]} kg.` : ""}</p>
+            : (() => {
+              const s = summaries[sel.key];
+              const dNet = s ? (s.maint || settings.maintenance) + s.ex - s.in : null;
+              return (
+                <>
+                  {dNet != null && <div style={{ fontSize: 15, marginBottom: 10 }}>Net: <strong style={{ color: dNet >= 0 ? T.good : T.bad }}>{dNet >= 0 ? "−" : "+"}{fmt(Math.abs(dNet))} kcal</strong><span style={{ color: T.sub }}> · in {fmt(s.in)} / out {fmt((s.maint || settings.maintenance) + s.ex)}{s.pro ? ` · ${s.pro}g protein` : ""}{weights[sel.key] ? ` · ${weights[sel.key]} kg` : ""}</span></div>}
+                  {sel.data.food.map(f => <div key={f.id} style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderTop: "1px solid rgba(255,255,255,0.06)", fontSize: 14 }}><span>🍽 {f.name}{f.pro > 0 ? ` · ${f.pro}g` : ""}</span><span style={{ fontWeight: 700 }}>{f.cal}</span></div>)}
+                  {sel.data.exercise.map(x => <div key={x.id} style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderTop: "1px solid rgba(255,255,255,0.06)", fontSize: 14 }}><span>🏃 {x.name}</span><span style={{ fontWeight: 700, color: T.burn }}>{x.cal}</span></div>)}
+                </>
+              );
+            })()}
+        </div>
+      )}
+
+      {/* goal projection */}
+      <div className="card-in" style={{ ...cardStyle, marginBottom: 0 }}>
+        <div style={tLabel}>Goal projection</div>
+        {!goal ? (
+          <div style={{ fontSize: 14, color: T.sub }}>Set a goal weight in Setup and the Board will project your arrival date from your actual trend.</div>
+        ) : !latestW ? (
+          <div style={{ fontSize: 14, color: T.sub }}>Goal set at <strong style={{ color: T.text }}>{goal} kg</strong> — log a weigh-in to start the projection.</div>
+        ) : toGo <= 0 ? (
+          <div style={{ ...numFont, fontSize: 30, fontWeight: 700, color: T.good }}>Goal reached — {latestW} kg 🏁</div>
+        ) : (
+          <>
+            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "baseline", gap: "6px 22px" }}>
+              <div style={big(T.good)}>{eta ? eta.toLocaleDateString([], { day: "numeric", month: "long" }) : "—"}</div>
+              <div style={{ fontSize: 14, color: T.sub }}>
+                {eta ? `projected at your current rate (${(ratePerDay * 7).toFixed(2)} kg/week)` : "no downward trend yet — string some deficit days together"}
+                {" · "}<strong style={{ color: T.text }}>{toGo} kg to go</strong>
+              </div>
+            </div>
+            {pctDone !== null && (
+              <div style={{ marginTop: 14 }}>
+                <div style={{ position: "relative", height: 12, borderRadius: 6, background: "rgba(255,255,255,0.07)", overflow: "hidden" }}>
+                  <div style={{ position: "absolute", inset: 0, width: `${pctDone}%`, background: "linear-gradient(90deg,#3DDC84,#4DD7C8)", boxShadow: "0 0 12px rgba(61,220,132,0.5)", transition: "width .6s" }} />
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: T.sub, marginTop: 7 }}>
+                  <span>Start {startW} kg</span>
+                  <span style={{ color: T.text, fontWeight: 600 }}>{Math.round(pctDone)}% there</span>
+                  <span>Goal {goal} kg</span>
+                </div>
+              </div>
+            )}
+          </>
+        )}
       </div>
     </>
   );
