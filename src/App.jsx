@@ -93,6 +93,10 @@ const GLOBAL_CSS = `
   .card-in { animation: cardIn .55s cubic-bezier(.2,.7,.2,1) both; }
   .sheet-in { animation: sheetUp .35s cubic-bezier(.2,.7,.2,1) both; }
   @media (prefers-reduced-motion: reduce) { .card-in, .sheet-in, .anim { animation: none !important; opacity: 1 !important; } button { transition: none; } }
+  @media (min-width: 1024px) {
+    .today-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
+  }
+  .navitem:hover { background: rgba(255,255,255,0.06) !important; }
 `;
 const BG = "radial-gradient(1200px 800px at 50% -10%, #1A2740 0%, #0E1626 45%, #090E18 100%)";
 
@@ -159,9 +163,23 @@ function Ring({ net, target }) {
   );
 }
 
-export default function DeficitTracker({ session }) {
-  const userId = session.user.id;
+// ---------- responsive ----------
+function useIsDesktop() {
+  const q = "(min-width: 1024px)";
+  const [d, setD] = useState(typeof window !== "undefined" && window.matchMedia(q).matches);
+  useEffect(() => {
+    const mq = window.matchMedia(q);
+    const h = (e) => setD(e.matches);
+    mq.addEventListener("change", h);
+    setD(mq.matches);
+    return () => mq.removeEventListener("change", h);
+  }, []);
+  return d;
+}
+
+export default function DeficitTracker({ session }) {  const userId = session.user.id;
   const token = session.access_token;
+  const isDesktop = useIsDesktop();
 
   const [tab, setTab] = useState("today");
   const [settings, setSettings] = useState({ maintenance: 2500, target: 500, goalWeight: null, presets: DEFAULT_PRESETS, onboarded: false });
@@ -393,15 +411,45 @@ export default function DeficitTracker({ session }) {
   return (
     <div style={{ minHeight: "100vh", background: BG, fontFamily: "'Inter',ui-sans-serif,system-ui,sans-serif", color: T.text }}>
       <style>{GLOBAL_CSS}</style>
-      {showTour && <Onboarding onFinish={finishTour} />}
+      {showTour && <Onboarding onFinish={finishTour} isDesktop={isDesktop} />}
 
-      <div style={{ maxWidth: tab === "board" ? 1100 : 460, margin: "0 auto", padding: "22px 16px 110px", transition: "max-width .3s" }}>
-
-        {/* header */}
-        <div className="card-in" style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 16 }}>
-          <div style={{ ...numFont, fontSize: 27, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase" }}>Deficit<span style={{ color: T.burn }}>.</span></div>
-          <div style={{ fontSize: 13, color: T.sub, fontWeight: 600 }}>{latestW ? `${latestW} kg` : ""}</div>
+      {/* desktop sidebar */}
+      {isDesktop && (
+        <div style={{ position: "fixed", top: 0, left: 0, bottom: 0, width: 230, background: "rgba(255,255,255,0.03)", borderRight: `1px solid ${T.glassBorder}`, backdropFilter: "blur(18px)", WebkitBackdropFilter: "blur(18px)", padding: "28px 16px 22px", display: "flex", flexDirection: "column", zIndex: 30 }}>
+          <div style={{ ...numFont, fontSize: 28, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase", marginBottom: 32, paddingLeft: 8 }}>Deficit<span style={{ color: T.burn }}>.</span></div>
+          {[["today", "Today"], ["fuel", "Fuel"], ["board", "Board"], ["history", "History"], ["setup", "Setup"]].map(([k, lbl]) => (
+            <button key={k} className="navitem" onClick={() => setTab(k)}
+              style={{
+                textAlign: "left", padding: "12px 14px", marginBottom: 4, borderRadius: 12, border: "none", cursor: "pointer",
+                fontSize: 15, fontWeight: 700, letterSpacing: "0.03em",
+                background: tab === k ? "linear-gradient(135deg,#E8431F,#FF7B42)" : "transparent",
+                color: tab === k ? "#fff" : T.sub,
+                boxShadow: tab === k ? "0 4px 16px rgba(232,67,31,0.35)" : "none",
+              }}>
+              {lbl}
+            </button>
+          ))}
+          <div style={{ marginTop: "auto", paddingTop: 18, borderTop: `1px solid ${T.glassBorder}`, paddingLeft: 8 }}>
+            {latestW && <div style={{ ...numFont, fontSize: 22, fontWeight: 700, color: "#B7A6FF" }}>{latestW} <span style={{ fontSize: 13, color: T.sub }}>kg</span></div>}
+            <div style={{ fontSize: 12, color: T.faint, marginTop: 4, wordBreak: "break-all" }}>{session.user.email}</div>
+          </div>
         </div>
+      )}
+
+      <div style={{
+        maxWidth: isDesktop ? (tab === "board" ? 1180 : 940) : (tab === "board" ? 1100 : 460),
+        margin: isDesktop ? "0 auto 0 230px" : "0 auto",
+        padding: isDesktop ? "34px 40px 56px" : "22px 16px 110px",
+        transition: "max-width .3s",
+      }}>
+
+        {/* header — mobile only; desktop uses the sidebar logo */}
+        {!isDesktop && (
+          <div className="card-in" style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 16 }}>
+            <div style={{ ...numFont, fontSize: 27, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase" }}>Deficit<span style={{ color: T.burn }}>.</span></div>
+            <div style={{ fontSize: 13, color: T.sub, fontWeight: 600 }}>{latestW ? `${latestW} kg` : ""}</div>
+          </div>
+        )}
 
         {error && (
           <div style={{ background: "rgba(255,92,92,0.12)", border: "1px solid rgba(255,92,92,0.3)", color: "#FF9B9B", borderRadius: 14, padding: "11px 14px", fontSize: 14, marginBottom: 12, display: "flex", justifyContent: "space-between", gap: 10 }}>
@@ -443,6 +491,8 @@ export default function DeficitTracker({ session }) {
               </div>
             )}
 
+            <div className="today-cols">
+            <div>
             {/* fuel in */}
             <div className="card-in" style={{ ...cardStyle, animationDelay: ".07s" }}>
               {sectionLabel(T.fuel, "Fuel in")}
@@ -484,6 +534,8 @@ export default function DeficitTracker({ session }) {
               )}
             </div>
 
+            </div>
+            <div>
             {/* training out */}
             <div className="card-in" style={{ ...cardStyle, animationDelay: ".14s" }}>
               {sectionLabel(T.burn, "Training out")}
@@ -515,6 +567,8 @@ export default function DeficitTracker({ session }) {
                 <button onClick={logWeight} style={btn(GRAD_INK, T.text)}>Log</button>
               </div>
               {weights[date] && <div style={{ fontSize: 13, color: T.good, marginTop: 10 }}>✓ Logged {weights[date]} kg today</div>}
+            </div>
+            </div>
             </div>
           </>
         )}
@@ -593,7 +647,8 @@ export default function DeficitTracker({ session }) {
         </div>
       )}
 
-      {/* floating dock nav */}
+      {/* floating dock nav — mobile only; desktop uses the sidebar */}
+      {!isDesktop && (
       <div style={{ position: "fixed", bottom: 14, left: 0, right: 0, display: "flex", justifyContent: "center", zIndex: 40, pointerEvents: "none" }}>
         <div style={{ display: "flex", gap: 4, padding: 5, borderRadius: 999, background: "rgba(20,29,46,0.85)", border: "1px solid rgba(255,255,255,0.1)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)", boxShadow: "0 10px 40px rgba(0,0,0,0.45)", pointerEvents: "auto" }}>
           {[["today", "Today"], ["fuel", "Fuel"], ["board", "Board"], ["history", "History"], ["setup", "Setup"]].map(([k, label]) => (
@@ -610,6 +665,7 @@ export default function DeficitTracker({ session }) {
           ))}
         </div>
       </div>
+      )}
     </div>
   );
 }
