@@ -195,6 +195,7 @@ export default function DeficitTracker({ session }) {
           supabase.from("weights").select("date,kg").eq("user_id", userId),
           supabase.from("days").select("entries").eq("user_id", userId).eq("date", date).maybeSingle(),
         ]);
+        const seenLocally = (() => { try { return window.localStorage.getItem(`deficit.onboarded.${userId}`) === "1"; } catch { return false; } })();
         if (stRes.data) {
           const s = {
             maintenance: stRes.data.maintenance,
@@ -204,8 +205,8 @@ export default function DeficitTracker({ session }) {
             onboarded: !!stRes.data.onboarded,
           };
           setSettings(s); setMaintDraft(String(s.maintenance)); setTargetDraft(String(s.target)); setGoalDraft(s.goalWeight ? String(s.goalWeight) : "");
-          if (!s.onboarded) setShowTour(true);
-        } else {
+          if (!s.onboarded && !seenLocally) setShowTour(true);
+        } else if (!seenLocally) {
           // brand-new user: no settings row yet → show the tour
           setShowTour(true);
         }
@@ -279,6 +280,7 @@ export default function DeficitTracker({ session }) {
 
   const finishTour = () => {
     setShowTour(false);
+    try { window.localStorage.setItem(`deficit.onboarded.${userId}`, "1"); } catch {}
     if (!settings.onboarded) persistSettings({ ...settings, onboarded: true });
   };
 
