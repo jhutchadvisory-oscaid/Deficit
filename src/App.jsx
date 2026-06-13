@@ -40,8 +40,13 @@ const callClaude = async (content, token) => {
   return JSON.parse(text.replace(/```json|```/g, "").trim());
 };
 
-const DEFAULT_PRESETS = [
-  { id: "p1", name: "Huel breakfast", cal: 200, pro: 20 },
+const ACTIVITY_TYPES = ["Run", "Bike", "Swim", "Strength", "Walk", "Hike", "Row", "Yoga", "Other"];
+
+// label for an exercise entry — new ones carry a `type`; older ones only had `name`
+const exLabel = (x) => x.type ? x.type : (x.name || "Workout");
+const exDesc = (x) => x.type && x.name ? x.name : "";
+
+const DEFAULT_PRESETS = [  { id: "p1", name: "Huel breakfast", cal: 200, pro: 20 },
   { id: "p2", name: "Lunch sandwich", cal: 400, pro: 18 },
   { id: "p3", name: "Huel Hot & Savoury", cal: 387, pro: 24 },
   { id: "p4", name: "Coffee, dash of milk", cal: 25, pro: 1 },
@@ -193,7 +198,7 @@ export default function DeficitTracker({ session }) {  const userId = session.us
   const [pending, setPending] = useState(null);
   const [error, setError] = useState("");
   const [foodDraft, setFoodDraft] = useState({ name: "", cal: "", pro: "" });
-  const [exDraft, setExDraft] = useState({ name: "", cal: "" });
+  const [exDraft, setExDraft] = useState({ type: "Run", desc: "", cal: "" });
   const [descDraft, setDescDraft] = useState("");
   const [weightDraft, setWeightDraft] = useState("");
   const [maintDraft, setMaintDraft] = useState("2500");
@@ -331,8 +336,8 @@ export default function DeficitTracker({ session }) {  const userId = session.us
   const addExercise = () => {
     const cal = parseInt(exDraft.cal, 10);
     if (!cal) return;
-    persistDay({ ...day, exercise: [...day.exercise, { id: uid(), name: exDraft.name.trim() || "Workout", cal, time: nowTime() }] });
-    setExDraft({ name: "", cal: "" });
+    persistDay({ ...day, exercise: [...day.exercise, { id: uid(), type: exDraft.type, name: exDraft.desc.trim(), cal, time: nowTime() }] });
+    setExDraft({ type: exDraft.type, desc: "", cal: "" });
   };
 
   const removeFood = (id) => persistDay({ ...day, food: day.food.filter(f => f.id !== id) });
@@ -561,19 +566,25 @@ export default function DeficitTracker({ session }) {  const userId = session.us
             {/* training out */}
             <div className="card-in" style={{ ...cardStyle, animationDelay: ".14s" }}>
               {sectionLabel(T.burn, "Training out")}
-              <div style={{ fontSize: 13, color: T.sub, marginBottom: 12, marginTop: -4 }}>Copy active calories from your Garmin after each session — log as many as you like.</div>
-              <div style={{ display: "flex", gap: 8 }}>
-                <input style={{ ...inputStyle, flex: 2 }} placeholder="e.g. Turbo session" value={exDraft.name} onChange={e => setExDraft({ ...exDraft, name: e.target.value })} />
+              <div style={{ fontSize: 13, color: T.sub, marginBottom: 12, marginTop: -4 }}>Pick the activity, add an optional note, then the active calories from your Garmin.</div>
+              <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                <select value={exDraft.type} onChange={e => setExDraft({ ...exDraft, type: e.target.value })}
+                  style={{ ...inputStyle, flex: 2, appearance: "none", WebkitAppearance: "none", backgroundImage: "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'><path d='M2 4l4 4 4-4' stroke='%238B95A7' stroke-width='1.5' fill='none' stroke-linecap='round'/></svg>\")", backgroundRepeat: "no-repeat", backgroundPosition: "right 14px center", paddingRight: 34 }}>
+                  {ACTIVITY_TYPES.map(t => <option key={t} value={t} style={{ background: "#141D2E" }}>{t}</option>)}
+                </select>
                 <input style={{ ...inputStyle, flex: 1 }} placeholder="kcal" inputMode="numeric" value={exDraft.cal} onChange={e => setExDraft({ ...exDraft, cal: e.target.value.replace(/\D/g, "") })} />
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <input style={{ ...inputStyle, flex: 1 }} placeholder="Optional note — e.g. Turbo intervals" value={exDraft.desc} onChange={e => setExDraft({ ...exDraft, desc: e.target.value })} onKeyDown={e => e.key === "Enter" && addExercise()} />
                 <button onClick={addExercise} style={{ ...btn(GRAD_BURN), boxShadow: "0 6px 20px rgba(232,67,31,0.3)" }}>Add</button>
               </div>
               {day.exercise.length > 0 && (
                 <div style={{ marginTop: 12 }}>
                   {day.exercise.map(x => (
                     <div key={x.id} style={{ display: "flex", alignItems: "center", padding: "10px 0", ...rowDivider, fontSize: 15 }}>
-                      <span style={{ flex: 1 }}>{x.name}</span>
+                      <span style={{ flex: 1 }}>{exLabel(x)}{exDesc(x) && <span style={{ fontSize: 13, color: T.sub }}> · {exDesc(x)}</span>}</span>
                       <span style={{ ...numFont, fontWeight: 700, fontSize: 17, color: T.burn }}>{fmt(x.cal)}</span>
-                      <button onClick={() => removeExercise(x.id)} aria-label={`Remove ${x.name}`} style={{ background: "none", border: "none", color: T.faint, cursor: "pointer", marginLeft: 12, fontSize: 14 }}>✕</button>
+                      <button onClick={() => removeExercise(x.id)} aria-label={`Remove ${exLabel(x)}`} style={{ background: "none", border: "none", color: T.faint, cursor: "pointer", marginLeft: 12, fontSize: 14 }}>✕</button>
                     </div>
                   ))}
                 </div>
@@ -1054,7 +1065,7 @@ function Board({ summaries, weights, settings, net, protein, exercise, fetchDay 
                 <>
                   {dNet != null && <div style={{ fontSize: 15, marginBottom: 10 }}>Net: <strong style={{ color: dNet >= 0 ? T.good : T.bad }}>{dNet >= 0 ? "−" : "+"}{fmt(Math.abs(dNet))} kcal</strong><span style={{ color: T.sub }}> · in {fmt(s.in)} / out {fmt((s.maint || settings.maintenance) + s.ex)}{s.pro ? ` · ${s.pro}g protein` : ""}{weights[sel.key] ? ` · ${weights[sel.key]} kg` : ""}</span></div>}
                   {sel.data.food.map(f => <div key={f.id} style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderTop: "1px solid rgba(255,255,255,0.06)", fontSize: 14 }}><span>🍽 {f.name}{f.pro > 0 ? ` · ${f.pro}g` : ""}</span><span style={{ fontWeight: 700 }}>{f.cal}</span></div>)}
-                  {sel.data.exercise.map(x => <div key={x.id} style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderTop: "1px solid rgba(255,255,255,0.06)", fontSize: 14 }}><span>🏃 {x.name}</span><span style={{ fontWeight: 700, color: T.burn }}>{x.cal}</span></div>)}
+                  {sel.data.exercise.map(x => <div key={x.id} style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderTop: "1px solid rgba(255,255,255,0.06)", fontSize: 14 }}><span>🏃 {exLabel(x)}{exDesc(x) ? ` · ${exDesc(x)}` : ""}</span><span style={{ fontWeight: 700, color: T.burn }}>{x.cal}</span></div>)}
                 </>
               );
             })()}
@@ -1310,7 +1321,7 @@ function History({ summaries, maintenance, weights, onApplyBaseline, fetchDay })
                 ))}
                 {sel.data.exercise.map(x => (
                   <div key={x.id} style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderTop: "1px solid rgba(255,255,255,0.06)", fontSize: 14 }}>
-                    <span>🏃 {x.name}</span><span style={{ fontWeight: 700, color: T.burn }}>{x.cal}</span>
+                    <span>🏃 {exLabel(x)}{exDesc(x) ? ` · ${exDesc(x)}` : ""}</span><span style={{ fontWeight: 700, color: T.burn }}>{x.cal}</span>
                   </div>
                 ))}
               </>
