@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import { supabase } from "./supabaseClient";
 import Onboarding from "./Onboarding";
 
@@ -10,37 +10,7 @@ const todayKey = () => {
 const fmt = (n) => Math.round(n).toLocaleString();
 const uid = () => Math.random().toString(36).slice(2, 9);
 
-const resizeToBase64 = (file, maxDim = 1024) =>
-  new Promise((resolve, reject) => {
-    const img = new Image();
-    const url = URL.createObjectURL(file);
-    img.onload = () => {
-      const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
-      const c = document.createElement("canvas");
-      c.width = Math.round(img.width * scale);
-      c.height = Math.round(img.height * scale);
-      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
-      URL.revokeObjectURL(url);
-      resolve(c.toDataURL("image/jpeg", 0.82).split(",")[1]);
-    };
-    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Couldn't read that image")); };
-    img.src = url;
-  });
-
-const JSON_SHAPE = '{"items":[{"name":"short food name","calories":number,"protein_g":number}],"confidence":"low"|"medium"|"high","note":"one short sentence on what drives uncertainty"}';
-
-const callClaude = async (content, token) => {
-  const res = await fetch("/.netlify/functions/estimate", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ messages: [{ role: "user", content }] }),
-  });
-  const data = await res.json();
-  const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("\n");
-  return JSON.parse(text.replace(/```json|```/g, "").trim());
-};
-
-const ACTIVITY_TYPES = ["Run", "Bike", "Swim", "Strength", "Walk", "Hike", "Row", "Yoga", "Other"];
+const ACTIVITY_TYPES = ["Run", "Bike", "Swim", "Strength", "Walk", "Hike", "Callisthenics", "Other"];
 
 // label for an exercise entry — new ones carry a `type`; older ones only had `name`
 const exLabel = (x) => x.type ? x.type : (x.name || "Workout");
@@ -183,7 +153,6 @@ function useIsDesktop() {
 }
 
 export default function DeficitTracker({ session }) {  const userId = session.user.id;
-  const token = session.access_token;
   const isDesktop = useIsDesktop();
 
   const [tab, setTab] = useState("today");
@@ -194,17 +163,13 @@ export default function DeficitTracker({ session }) {  const userId = session.us
   const [weights, setWeights] = useState({});
   const [ready, setReady] = useState(false);
   const [splash, setSplash] = useState(true);
-  const [analyzing, setAnalyzing] = useState(false);
-  const [pending, setPending] = useState(null);
   const [error, setError] = useState("");
   const [foodDraft, setFoodDraft] = useState({ name: "", cal: "", pro: "" });
   const [exDraft, setExDraft] = useState({ type: "Run", desc: "", cal: "" });
-  const [descDraft, setDescDraft] = useState("");
   const [weightDraft, setWeightDraft] = useState("");
   const [maintDraft, setMaintDraft] = useState("2500");
   const [targetDraft, setTargetDraft] = useState("500");
   const [goalDraft, setGoalDraft] = useState("");
-  const fileRef = useRef(null);
   const date = todayKey();
 
   // ---------- load from Supabase ----------
@@ -352,48 +317,6 @@ export default function DeficitTracker({ session }) {  const userId = session.us
     if (err) setError("Saving failed — weight may not have synced.");
   };
 
-  // ---------- AI estimates ----------
-  const receiveEstimate = (parsed) => {
-    if (!parsed.items || parsed.items.length === 0) { setError(parsed.note || "No food detected."); return; }
-    setPending({
-      items: parsed.items.map(i => ({ id: uid(), name: i.name, cal: Math.round(i.calories), pro: Math.round(i.protein_g || 0) })),
-      confidence: parsed.confidence, note: parsed.note
-    });
-  };
-
-  const onPhoto = async (e) => {
-    const file = e.target.files && e.target.files[0];
-    e.target.value = "";
-    if (!file) return;
-    setError(""); setAnalyzing(true);
-    try {
-      const b64 = await resizeToBase64(file);
-      const parsed = await callClaude([
-        { type: "image", source: { type: "base64", media_type: "image/jpeg", data: b64 } },
-        { type: "text", text: `Estimate the calories and protein in this food photo. Judge portion sizes from visual cues (plate size, utensils, packaging). Respond ONLY with raw JSON, no markdown fences, in this exact shape: ${JSON_SHAPE}. If no food is visible, return {"items":[],"confidence":"low","note":"No food detected"}.` }
-      ], token);
-      receiveEstimate(parsed);
-    } catch { setError("Couldn't analyse that photo — try again or add it manually."); }
-    setAnalyzing(false);
-  };
-
-  const describeFood = async () => {
-    if (!descDraft.trim()) return;
-    setError(""); setAnalyzing(true);
-    try {
-      const parsed = await callClaude(`Estimate calories and protein for this food description: "${descDraft.trim()}". Use typical UK portion sizes and brands where named. Respond ONLY with raw JSON, no markdown fences, in this exact shape: ${JSON_SHAPE}.`, token);
-      receiveEstimate(parsed);
-      setDescDraft("");
-    } catch { setError("Couldn't estimate that — try rephrasing or add it manually."); }
-    setAnalyzing(false);
-  };
-
-  const confirmPending = () => {
-    const entries = pending.items.filter(i => i.cal > 0).map(i => ({ id: i.id, name: i.name, cal: i.cal, pro: i.pro || 0, time: nowTime(), src: "ai" }));
-    persistDay({ ...day, food: [...day.food, ...entries] });
-    setPending(null);
-  };
-
   // ---------- maths ----------
   const intake = day.food.reduce((s, f) => s + f.cal, 0);
   const protein = day.food.reduce((s, f) => s + (f.pro || 0), 0);
@@ -523,17 +446,8 @@ export default function DeficitTracker({ session }) {  const userId = session.us
             {/* fuel in */}
             <div className="card-in" style={{ ...cardStyle, animationDelay: ".07s" }}>
               {sectionLabel(T.fuel, "Fuel in")}
-              <button onClick={() => fileRef.current && fileRef.current.click()} disabled={analyzing}
-                style={{ ...btn(GRAD_FUEL), width: "100%", padding: "16px", fontSize: 16, opacity: analyzing ? 0.55 : 1, boxShadow: "0 6px 20px rgba(46,124,246,0.35)" }}>
-                {analyzing ? "Analysing…" : "📷  Photograph your food"}
-              </button>
-              <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={onPhoto} style={{ display: "none" }} />
-              <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-                <input style={{ ...inputStyle, flex: 1 }} placeholder='Or describe it — "Pret chicken wrap"' value={descDraft} onChange={e => setDescDraft(e.target.value)} />
-                <button onClick={describeFood} disabled={analyzing} style={{ ...btn("rgba(77,163,255,0.15)", T.fuel), border: "1px solid rgba(77,163,255,0.35)", opacity: analyzing ? 0.55 : 1 }}>Estimate</button>
-              </div>
               {(settings.presets || []).length > 0 && (
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 14 }}>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
                   {settings.presets.map(p => (
                     <button key={p.id} onClick={() => logPreset(p)}
                       style={{ padding: "9px 14px", borderRadius: 999, border: `1px solid ${T.glassBorder}`, background: "rgba(255,255,255,0.06)", fontSize: 14, fontWeight: 600, color: T.text, cursor: "pointer" }}>
@@ -543,7 +457,7 @@ export default function DeficitTracker({ session }) {  const userId = session.us
                 </div>
               )}
               <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
-                <input style={{ ...inputStyle, flex: 2 }} placeholder="Manual — e.g. Banana" value={foodDraft.name} onChange={e => setFoodDraft({ ...foodDraft, name: e.target.value })} />
+                <input style={{ ...inputStyle, flex: 2 }} placeholder="Add food — e.g. Banana" value={foodDraft.name} onChange={e => setFoodDraft({ ...foodDraft, name: e.target.value })} />
                 <input style={{ ...inputStyle, flex: 1 }} placeholder="kcal" inputMode="numeric" value={foodDraft.cal} onChange={e => setFoodDraft({ ...foodDraft, cal: e.target.value.replace(/\D/g, "") })} />
                 <input style={{ ...inputStyle, flex: 0.9 }} placeholder="g" inputMode="numeric" value={foodDraft.pro} onChange={e => setFoodDraft({ ...foodDraft, pro: e.target.value.replace(/\D/g, "") })} />
                 <button onClick={addFood} style={btn(GRAD_INK, T.text)}>Add</button>
@@ -651,34 +565,6 @@ export default function DeficitTracker({ session }) {  const userId = session.us
           </div>
         )}
       </div>
-
-      {/* estimate confirmation sheet */}
-      {pending && (
-        <div style={{ position: "fixed", inset: 0, background: "rgba(5,8,14,0.7)", backdropFilter: "blur(4px)", WebkitBackdropFilter: "blur(4px)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 50 }}>
-          <div className="sheet-in" style={{ background: "#141D2E", border: "1px solid rgba(255,255,255,0.1)", borderBottom: "none", borderRadius: "24px 24px 0 0", padding: "22px 20px 30px", width: "100%", maxWidth: 460, boxSizing: "border-box", boxShadow: "0 -12px 50px rgba(0,0,0,0.5)" }}>
-            <div style={{ ...labelStyle, color: T.fuel }}>AI estimate · {pending.confidence} confidence</div>
-            {pending.note && <div style={{ fontSize: 13, color: T.sub, margin: "7px 0 14px" }}>{pending.note}</div>}
-            <div style={{ display: "flex", gap: 8, fontSize: 11, color: T.faint, marginBottom: 5, padding: "0 2px" }}>
-              <span style={{ flex: 2 }}>Item</span><span style={{ flex: 1 }}>kcal</span><span style={{ flex: 0.8 }}>protein g</span>
-            </div>
-            {pending.items.map((i, idx) => (
-              <div key={i.id} style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
-                <input style={{ ...inputStyle, flex: 2 }} value={i.name} onChange={e => { const items = [...pending.items]; items[idx] = { ...i, name: e.target.value }; setPending({ ...pending, items }); }} />
-                <input style={{ ...inputStyle, flex: 1, ...numFont, fontWeight: 700 }} inputMode="numeric" value={i.cal} onChange={e => { const items = [...pending.items]; items[idx] = { ...i, cal: parseInt(e.target.value.replace(/\D/g, ""), 10) || 0 }; setPending({ ...pending, items }); }} />
-                <input style={{ ...inputStyle, flex: 0.8 }} inputMode="numeric" value={i.pro} onChange={e => { const items = [...pending.items]; items[idx] = { ...i, pro: parseInt(e.target.value.replace(/\D/g, ""), 10) || 0 }; setPending({ ...pending, items }); }} />
-              </div>
-            ))}
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, fontWeight: 700, margin: "12px 2px 18px" }}>
-              <span>Total</span>
-              <span style={numFont}>{fmt(pending.items.reduce((s, i) => s + (i.cal || 0), 0))} kcal · {pending.items.reduce((s, i) => s + (i.pro || 0), 0)}g protein</span>
-            </div>
-            <div style={{ display: "flex", gap: 10 }}>
-              <button onClick={() => setPending(null)} style={{ ...btn("rgba(255,255,255,0.08)", T.text), flex: 1, border: `1px solid ${T.glassBorder}` }}>Discard</button>
-              <button onClick={confirmPending} style={{ ...btn(GRAD_FUEL), flex: 2, boxShadow: "0 6px 20px rgba(46,124,246,0.35)" }}>Log it</button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* floating dock nav — mobile only; desktop uses the sidebar */}
       {!isDesktop && (
