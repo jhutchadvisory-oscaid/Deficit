@@ -833,13 +833,24 @@ function Board({ summaries, weights, settings, net, protein, exercise, fetchDay 
   const train7 = last7.reduce((a, x) => a + (x.s ? x.s.ex : 0), 0);
   const trainDays7 = last7.filter(x => x.s && x.s.ex > 0).length;
 
+  // weekly streak: consecutive Mon–Sun weeks whose total net hit (target × days logged that week).
+  // The current in-progress week counts only if already ahead, but never breaks the streak.
+  const weekStartFor = (d) => { const x = new Date(d); x.setHours(0, 0, 0, 0); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return x; };
   let streak = 0;
-  for (let i = 0; i < 365; i++) {
-    const d = new Date(); d.setDate(d.getDate() - i);
-    const s = summaries[keyFor(d)];
-    const dayNet = s ? (s.maint || settings.maintenance) + s.ex - s.in : null;
-    if (s && dayNet >= settings.target) streak++;
-    else if (i === 0) continue;
+  for (let w = 0; w < 104; w++) {
+    const mon = weekStartFor(new Date());
+    mon.setDate(mon.getDate() - w * 7);
+    let wNet = 0, wDays = 0, inProgress = false;
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(mon); d.setDate(mon.getDate() + i);
+      if (d > new Date()) { inProgress = true; break; }
+      const s = summaries[keyFor(d)];
+      if (s) { wNet += (s.maint || settings.maintenance) + s.ex - s.in; wDays++; }
+    }
+    if (wDays === 0) { if (w === 0) continue; else break; }        // unlogged week
+    const hit = wNet >= settings.target * wDays;
+    if (hit) streak++;
+    else if (w === 0 && inProgress) continue;                       // this week not finished — don't penalise
     else break;
   }
 
@@ -933,8 +944,8 @@ function Board({ summaries, weights, settings, net, protein, exercise, fetchDay 
         </div>
         <div className="card-in" style={{ ...tile, animationDelay: ".1s" }}>
           <div style={tLabel}>Streak</div>
-          <div style={big(streak > 0 ? T.amber : T.faint)}>{streak}<span style={{ fontSize: 17, color: T.sub, marginLeft: 6 }}>day{streak === 1 ? "" : "s"}</span></div>
-          <div style={subLine}>Consecutive days hitting target</div>
+          <div style={big(streak > 0 ? T.amber : T.faint)}>{streak}<span style={{ fontSize: 17, color: T.sub, marginLeft: 6 }}>week{streak === 1 ? "" : "s"}</span></div>
+          <div style={subLine}>Consecutive weeks hitting your target</div>
         </div>
         <div className="card-in" style={{ ...tile, ...kpiClick("protein"), animationDelay: ".15s" }} onClick={() => setMetric("protein")}>
           <div style={tLabel}>Protein</div>
