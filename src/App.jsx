@@ -328,8 +328,25 @@ export default function DeficitTracker({ session }) {  const userId = session.us
   };
 
   const fetchDay = async (key) => {
-    const { data } = await supabase.from("days").select("entries").eq("user_id", userId).eq("date", key).maybeSingle();
-    return data ? data.entries : null;
+    const { data } = await supabase.from("days").select("entries,water,maintenance").eq("user_id", userId).eq("date", key).maybeSingle();
+    return data ? { entries: data.entries, water: data.water || 0, maintenance: data.maintenance } : null;
+  };
+
+  // edit/save any date (used to backfill or fix past days from History)
+  const persistDayFor = async (key, newEntries) => {
+    const intake = newEntries.food.reduce((s, f) => s + f.cal, 0);
+    const pro = newEntries.food.reduce((s, f) => s + (f.pro || 0), 0);
+    const exTotal = newEntries.exercise.reduce((s, e) => s + e.cal, 0);
+    const existing = summaries[key];
+    // keep the day's own baseline if it already had one; otherwise use current setting
+    const maint = existing && existing.maint ? existing.maint : settings.maintenance;
+    const wtr = existing ? (existing.water || 0) : 0;
+    setSummaries(prev => ({ ...prev, [key]: { in: intake, ex: exTotal, maint, pro, water: wtr } }));
+    if (key === date) setDay(newEntries); // keep Today in sync if they edited today
+    const { error: err } = await supabase.from("days").upsert({
+      user_id: userId, date: key, intake, protein: pro, training: exTotal, maintenance: maint, water: wtr, entries: newEntries, updated_at: new Date().toISOString(),
+    });
+    if (err) setError("Saving failed — your change may not have synced.");
   };
 
   const updatePreset = (id, patch) => setSettings({ ...settings, presets: settings.presets.map(p => p.id === id ? { ...p, ...patch } : p) });
@@ -593,7 +610,7 @@ export default function DeficitTracker({ session }) {  const userId = session.us
           </>
         )}
 
-        {tab === "history" && <History summaries={summaries} maintenance={settings.maintenance} weights={weights} onApplyBaseline={applyBaseline} fetchDay={fetchDay} />}
+        {tab === "history" && <History summaries={summaries} maintenance={settings.maintenance} weights={weights} onApplyBaseline={applyBaseline} fetchDay={fetchDay} persistDayFor={persistDayFor} presets={settings.presets || []} />}
 
         {tab === "board" && <Board summaries={summaries} weights={weights} settings={settings} net={net} protein={protein} exercise={exercise} fetchDay={fetchDay} />}
 
@@ -889,7 +906,7 @@ function Board({ summaries, weights, settings, net, protein, exercise, fetchDay 
 
   const openDay = async (key) => {
     setSel({ key, loading: true, data: null });
-    try { const data = await fetchDay(key); setSel({ key, loading: false, data }); }
+    try { const r = await fetchDay(key); setSel({ key, loading: false, data: r ? r.entries : null }); }
     catch { setSel({ key, loading: false, data: null }); }
   };
 
@@ -1164,22 +1181,45 @@ function Board({ summaries, weights, settings, net, protein, exercise, fetchDay 
 }
 
 // ---------- history: trend + calibration + calendar ----------
-function History({ summaries, maintenance, weights, onApplyBaseline, fetchDay }) {
+function History({ summaries, maintenance, weights, onApplyBaseline, fetchDay, persistDayFor, presets }) {
   const [month, setMonth] = useState(() => { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), 1); });
   const [sel, setSel] = useState(null);
   const [applied, setApplied] = useState(false);
+  const [edit, setEdit] = useState(null); // { food:[], exercise:[] } when editing the open day
+  const [fDraft, setFDraft] = useState({ name: "", cal: "", pro: "" });
+  const [eDraft, setEDraft] = useState({ type: "Run", desc: "", cal: "" });
+  const [saving, setSaving] = useState(false);
 
   const keyFor = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   const todayK = keyFor(new Date());
   const label = { ...labelStyle, color: T.sub };
   const navBtn = { background: "rgba(255,255,255,0.07)", border: `1px solid ${T.glassBorder}`, borderRadius: 10, padding: "6px 13px", fontSize: 16, cursor: "pointer", color: T.text };
+  const inStyle = { width: "100%", padding: "11px 12px", borderRadius: 11, border: "1px solid rgba(255,255,255,0.12)", background: "rgba(255,255,255,0.06)", fontSize: 15, color: T.text, outline: "none", boxSizing: "border-box" };
 
   const openDay = async (key) => {
     setSel({ key, loading: true, data: null });
+    setEdit(null);
     try {
-      const data = await fetchDay(key);
-      setSel({ key, loading: false, data });
+      const r = await fetchDay(key);
+      setSel({ key, loading: false, data: r ? r.entries : null });
     } catch { setSel({ key, loading: false, data: null }); }
+  };
+
+  const startEdit = () => setEdit(sel.data ? { food: [...sel.data.food], exercise: [...sel.data.exercise] } : { food: [], exercise: [] });
+  const cancelEdit = () => { setEdit(null); setFDraft({ name: "", cal: "", pro: "" }); setEDraft({ type: "Run", desc: "", cal: "" }); };
+
+  const editAddPreset = (p) => setEdit(e => ({ ...e, food: [...e.food, { id: Math.random().toString(36).slice(2, 9), name: p.name, cal: p.cal, pro: p.pro || 0, src: "preset" }] }));
+  const editAddFood = () => { const cal = parseInt(fDraft.cal, 10); if (!fDraft.name.trim() || !cal) return; setEdit(e => ({ ...e, food: [...e.food, { id: Math.random().toString(36).slice(2, 9), name: fDraft.name.trim(), cal, pro: parseInt(fDraft.pro, 10) || 0, src: "manual" }] })); setFDraft({ name: "", cal: "", pro: "" }); };
+  const editAddEx = () => { const cal = parseInt(eDraft.cal, 10); if (!cal) return; setEdit(e => ({ ...e, exercise: [...e.exercise, { id: Math.random().toString(36).slice(2, 9), type: eDraft.type, name: eDraft.desc.trim(), cal }] })); setEDraft({ type: eDraft.type, desc: "", cal: "" }); };
+  const editDelFood = (id) => setEdit(e => ({ ...e, food: e.food.filter(f => f.id !== id) }));
+  const editDelEx = (id) => setEdit(e => ({ ...e, exercise: e.exercise.filter(x => x.id !== id) }));
+
+  const saveEdit = async () => {
+    setSaving(true);
+    await persistDayFor(sel.key, edit);
+    setSel(s => ({ ...s, data: edit }));
+    setEdit(null); setFDraft({ name: "", cal: "", pro: "" }); setEDraft({ type: "Run", desc: "", cal: "" });
+    setSaving(false);
   };
 
   const days = [];
@@ -1353,14 +1393,66 @@ function History({ summaries, maintenance, weights, onApplyBaseline, fetchDay })
 
         {sel && (
           <div style={{ marginTop: 16, paddingTop: 14, ...divider }}>
-            <div style={{ ...label, color: T.text, marginBottom: 8 }}>
-              {new Date(sel.key + "T12:00:00").toLocaleDateString([], { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <div style={{ ...label, color: T.text }}>
+                {new Date(sel.key + "T12:00:00").toLocaleDateString([], { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
+              </div>
+              {!sel.loading && !edit && <button onClick={startEdit} style={{ ...navBtn, fontSize: 13, fontWeight: 700, padding: "7px 14px" }}>{sel.data && (sel.data.food.length || sel.data.exercise.length) ? "Edit day" : "Add entries"}</button>}
             </div>
+
             {sel.loading ? (
               <p style={{ fontSize: 14, color: T.sub, margin: 0 }}>Loading…</p>
+            ) : edit ? (
+              /* ---- EDIT MODE ---- */
+              <>
+                {presets.length > 0 && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 7, marginBottom: 10 }}>
+                    {presets.map(p => (
+                      <button key={p.id} onClick={() => editAddPreset(p)} style={{ padding: "8px 12px", borderRadius: 999, border: `1px solid ${T.glassBorder}`, background: "rgba(255,255,255,0.06)", fontSize: 13, fontWeight: 600, color: T.text, cursor: "pointer" }}>
+                        {p.name} <span style={{ ...numFont, color: T.fuel, fontWeight: 700 }}>{p.cal}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {edit.food.map(f => (
+                  <div key={f.id} style={{ display: "flex", alignItems: "center", padding: "7px 0", borderTop: "1px solid rgba(255,255,255,0.06)", fontSize: 14 }}>
+                    <span style={{ flex: 1 }}>🍽 {f.name}{f.pro > 0 ? ` · ${f.pro}g` : ""}</span>
+                    <span style={{ fontWeight: 700 }}>{f.cal}</span>
+                    <button onClick={() => editDelFood(f.id)} style={{ background: "none", border: "none", color: T.faint, cursor: "pointer", marginLeft: 10, fontSize: 14 }}>✕</button>
+                  </div>
+                ))}
+                <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                  <input style={{ ...inStyle, flex: 2 }} placeholder="Food" value={fDraft.name} onChange={e => setFDraft({ ...fDraft, name: e.target.value })} />
+                  <input style={{ ...inStyle, flex: 1 }} placeholder="kcal" inputMode="numeric" value={fDraft.cal} onChange={e => setFDraft({ ...fDraft, cal: e.target.value.replace(/\D/g, "") })} />
+                  <input style={{ ...inStyle, flex: 0.9 }} placeholder="g" inputMode="numeric" value={fDraft.pro} onChange={e => setFDraft({ ...fDraft, pro: e.target.value.replace(/\D/g, "") })} />
+                  <button onClick={editAddFood} style={{ ...navBtn, fontWeight: 700 }}>+</button>
+                </div>
+
+                {edit.exercise.map(x => (
+                  <div key={x.id} style={{ display: "flex", alignItems: "center", padding: "7px 0", borderTop: "1px solid rgba(255,255,255,0.06)", fontSize: 14 }}>
+                    <span style={{ flex: 1 }}>🏃 {exLabel(x)}{exDesc(x) ? ` · ${exDesc(x)}` : ""}</span>
+                    <span style={{ fontWeight: 700, color: T.burn }}>{x.cal}</span>
+                    <button onClick={() => editDelEx(x.id)} style={{ background: "none", border: "none", color: T.faint, cursor: "pointer", marginLeft: 10, fontSize: 14 }}>✕</button>
+                  </div>
+                ))}
+                <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                  <select value={eDraft.type} onChange={e => setEDraft({ ...eDraft, type: e.target.value })} style={{ ...inStyle, flex: 1.4, appearance: "none", WebkitAppearance: "none" }}>
+                    {ACTIVITY_TYPES.map(t => <option key={t} value={t} style={{ background: "#141D2E" }}>{t}</option>)}
+                  </select>
+                  <input style={{ ...inStyle, flex: 1.4 }} placeholder="note" value={eDraft.desc} onChange={e => setEDraft({ ...eDraft, desc: e.target.value })} />
+                  <input style={{ ...inStyle, flex: 1 }} placeholder="kcal" inputMode="numeric" value={eDraft.cal} onChange={e => setEDraft({ ...eDraft, cal: e.target.value.replace(/\D/g, "") })} />
+                  <button onClick={editAddEx} style={{ ...navBtn, fontWeight: 700, color: T.burn }}>+</button>
+                </div>
+
+                <div style={{ display: "flex", gap: 10, marginTop: 14 }}>
+                  <button onClick={cancelEdit} style={{ flex: 1, padding: "12px", borderRadius: 12, border: `1px solid ${T.glassBorder}`, background: "rgba(255,255,255,0.06)", color: T.text, fontSize: 14, fontWeight: 700, cursor: "pointer" }}>Cancel</button>
+                  <button onClick={saveEdit} disabled={saving} style={{ flex: 2, padding: "12px", borderRadius: 12, border: "none", background: "linear-gradient(135deg,#2E7CF6,#4DA3FF)", color: "#fff", fontSize: 14, fontWeight: 700, cursor: "pointer", opacity: saving ? 0.6 : 1, boxShadow: "0 6px 20px rgba(46,124,246,0.35)" }}>{saving ? "Saving…" : "Save day"}</button>
+                </div>
+              </>
             ) : !sel.data || (sel.data.food.length === 0 && sel.data.exercise.length === 0) ? (
-              <p style={{ fontSize: 14, color: T.sub, margin: 0 }}>Nothing logged this day.{weights[sel.key] ? ` Weight: ${weights[sel.key]} kg.` : ""}</p>
+              <p style={{ fontSize: 14, color: T.sub, margin: 0 }}>Nothing logged this day.{weights[sel.key] ? ` Weight: ${weights[sel.key]} kg.` : ""} Tap "Add entries" to fill it in.</p>
             ) : (
+              /* ---- VIEW MODE ---- */
               <>
                 {selNet !== null && (
                   <div style={{ fontSize: 15, marginBottom: 10 }}>
