@@ -1237,23 +1237,42 @@ function History({ summaries, maintenance, weights, onApplyBaseline, fetchDay, p
   const wEntries = wKeys.map(k => ({ key: k, w: weights[k] }));
   let calib = null;
   if (wKeys.length >= 2) {
-    const first = wKeys[0], last = wKeys[wKeys.length - 1];
-    const spanDays = Math.round((new Date(last) - new Date(first)) / 86400000);
-    if (spanDays >= 7) {
+    // Use a settled window: skip the first 7 days of weigh-ins (early loss is mostly
+    // water/glycogen and over-estimates true burn). Need at least ~14 days total to engage.
+    const totalSpan = Math.round((new Date(wKeys[wKeys.length - 1]) - new Date(wKeys[0])) / 86400000);
+    if (totalSpan < 14) {
+      calib = { tooEarly: true, totalSpan };
+    } else {
+      // anchor = first weigh-in at least 7 days after the very first one
+      const firstDate = new Date(wKeys[0] + "T12:00:00");
+      const anchorKey = wKeys.find(k => (new Date(k + "T12:00:00") - firstDate) / 86400000 >= 7) || wKeys[0];
+      const last = wKeys[wKeys.length - 1];
+      const spanDays = Math.round((new Date(last) - new Date(anchorKey)) / 86400000);
+
       let predicted = 0, loggedDays = 0;
-      const cur = new Date(first + "T12:00:00");
+      const cur = new Date(anchorKey + "T12:00:00");
       const end = new Date(last + "T12:00:00");
       while (cur <= end) {
-        const k = keyFor(cur);
-        const s = summaries[k];
-        if (s) { predicted += (s.maint || maintenance) + s.ex - s.in; loggedDays++; }
+        const s = summaries[keyFor(cur)];
+        // use the baseline FROZEN on the day it was logged — never the current setting,
+        // otherwise accepting a correction shifts the prediction and the suggestion runs away
+        if (s && s.maint) { predicted += s.maint + s.ex - s.in; loggedDays++; }
         cur.setDate(cur.getDate() + 1);
       }
-      if (loggedDays >= Math.max(5, spanDays * 0.5)) {
+
+      if (spanDays >= 7 && loggedDays >= Math.max(7, spanDays * 0.6)) {
         const predictedKg = predicted / 7700;
-        const actualKg = weights[first] - weights[last];
-        const driftPerDay = Math.round(((actualKg - predictedKg) * 7700) / spanDays);
-        calib = { spanDays, actualKg, predictedKg, driftPerDay, suggested: maintenance + driftPerDay };
+        const actualKg = weights[anchorKey] - weights[last];
+        const rawDrift = Math.round(((actualKg - predictedKg) * 7700) / spanDays);
+        // cap any single correction so noise can't throw the baseline wildly
+        const driftPerDay = Math.max(-400, Math.min(400, rawDrift));
+        const capped = rawDrift !== driftPerDay;
+        // average stored baseline across the window — the figure these predictions were built on
+        let baseSum = 0, baseN = 0;
+        const c2 = new Date(anchorKey + "T12:00:00");
+        while (c2 <= end) { const s = summaries[keyFor(c2)]; if (s && s.maint) { baseSum += s.maint; baseN++; } c2.setDate(c2.getDate() + 1); }
+        const avgBaseline = baseN ? Math.round(baseSum / baseN) : maintenance;
+        calib = { spanDays, actualKg, predictedKg, driftPerDay, capped, suggested: avgBaseline + driftPerDay, alreadyClose: Math.abs(rawDrift) < 100 };
       } else {
         calib = { insufficient: true, spanDays };
       }
@@ -1331,23 +1350,24 @@ function History({ summaries, maintenance, weights, onApplyBaseline, fetchDay, p
               <span>{wEntries[wEntries.length - 1].w} kg · {new Date(wEntries[wEntries.length - 1].key + "T12:00:00").toLocaleDateString([], { day: "numeric", month: "short" })}</span>
             </div>
             <div style={{ marginTop: 12, paddingTop: 12, ...divider, fontSize: 14, lineHeight: 1.6 }}>
-              {!calib && <span style={{ color: T.sub }}>Keep weighing in — calibration kicks in once your weigh-ins span at least a week.</span>}
-              {calib && calib.insufficient && <span style={{ color: T.sub }}>Your weigh-ins span {calib.spanDays} days but too few days have food/training logged in between for a reliable calibration. Keep logging daily.</span>}
-              {calib && !calib.insufficient && (
+              {!calib && <span style={{ color: T.sub }}>Keep weighing in — calibration kicks in once your weigh-ins span two weeks.</span>}
+              {calib && calib.tooEarly && <span style={{ color: T.sub }}>Your weigh-ins span {calib.totalSpan} day{calib.totalSpan === 1 ? "" : "s"}. Calibration needs about two weeks of data — and it ignores the first week, since early loss is mostly water and would over-estimate your burn. Keep logging.</span>}
+              {calib && calib.insufficient && <span style={{ color: T.sub }}>Not enough days have food and training logged across your weigh-in window for a reliable calibration yet. Keep logging daily.</span>}
+              {calib && !calib.insufficient && !calib.tooEarly && (
                 <>
-                  Over {calib.spanDays} days you {calib.actualKg >= 0 ? "lost" : "gained"} <strong>{Math.abs(calib.actualKg).toFixed(1)} kg</strong>; your logged deficits predicted {calib.predictedKg >= 0 ? "a loss of" : "a gain of"} <strong>{Math.abs(calib.predictedKg).toFixed(1)} kg</strong>.{" "}
-                  {Math.abs(calib.driftPerDay) < 100 ? (
+                  Over the last {calib.spanDays} settled days you {calib.actualKg >= 0 ? "lost" : "gained"} <strong>{Math.abs(calib.actualKg).toFixed(1)} kg</strong>; your logged deficits predicted {calib.predictedKg >= 0 ? "a loss of" : "a gain of"} <strong>{Math.abs(calib.predictedKg).toFixed(1)} kg</strong>.{" "}
+                  {calib.alreadyClose ? (
                     <span style={{ color: T.good, fontWeight: 600 }}>Your baseline looks accurate — no change needed.</span>
                   ) : (
                     <>
-                      Your true daily burn looks about <strong>{Math.abs(calib.driftPerDay)} kcal {calib.driftPerDay > 0 ? "higher" : "lower"}</strong> than assumed.
+                      Your true daily burn looks about <strong>{Math.abs(calib.driftPerDay)} kcal {calib.driftPerDay > 0 ? "higher" : "lower"}</strong> than assumed{calib.capped ? " (capped — re-check after a few more days)" : ""}.
                       {!applied ? (
                         <button onClick={() => { onApplyBaseline(calib.suggested); setApplied(true); }}
                           style={{ display: "block", marginTop: 12, padding: "12px 16px", borderRadius: 12, border: "none", background: GRAD_FUEL, color: "#fff", fontSize: 14, fontWeight: 700, cursor: "pointer", width: "100%", boxShadow: "0 6px 20px rgba(46,124,246,0.35)" }}>
                           Update baseline to {calib.suggested.toLocaleString()} kcal
                         </button>
                       ) : (
-                        <span style={{ color: T.good, fontWeight: 600 }}> ✓ Baseline updated.</span>
+                        <span style={{ color: T.good, fontWeight: 600, display: "block", marginTop: 10 }}> ✓ Baseline updated to {calib.suggested.toLocaleString()}. Give it a few more days of logging before calibrating again.</span>
                       )}
                     </>
                   )}
