@@ -11,6 +11,7 @@ const fmt = (n) => Math.round(n).toLocaleString();
 const uid = () => Math.random().toString(36).slice(2, 9);
 
 const ACTIVITY_TYPES = ["Run", "Bike", "Swim", "Strength", "Walk", "Hike", "Callisthenics", "Other"];
+const HOLIDAY_SURPLUS = 500; // a holiday day assumes you ate this many kcal OVER your total burn
 
 // label for an exercise entry — new ones carry a `type`; older ones only had `name`
 const exLabel = (x) => x.type ? x.type : (x.name || "Workout");
@@ -194,6 +195,7 @@ export default function DeficitTracker({ session }) {  const userId = session.us
   const [showTour, setShowTour] = useState(false);
   const [day, setDay] = useState({ food: [], exercise: [] });
   const [water, setWater] = useState(0);
+  const [holiday, setHoliday] = useState(false);
   const [summaries, setSummaries] = useState({});
   const [weights, setWeights] = useState({});
   const [ready, setReady] = useState(false);
@@ -216,9 +218,9 @@ export default function DeficitTracker({ session }) {  const userId = session.us
       try {
         const [stRes, daysRes, wRes, todayRes] = await Promise.all([
           supabase.from("settings").select("*").eq("user_id", userId).maybeSingle(),
-          supabase.from("days").select("date,intake,protein,training,maintenance,water").eq("user_id", userId),
+          supabase.from("days").select("date,intake,protein,training,maintenance,water,holiday").eq("user_id", userId),
           supabase.from("weights").select("date,kg").eq("user_id", userId),
-          supabase.from("days").select("entries,water").eq("user_id", userId).eq("date", date).maybeSingle(),
+          supabase.from("days").select("entries,water,holiday").eq("user_id", userId).eq("date", date).maybeSingle(),
         ]);
         const seenLocally = (() => { try { return window.localStorage.getItem(`deficit.onboarded.${userId}`) === "1"; } catch { return false; } })();
         if (stRes.data) {
@@ -240,7 +242,7 @@ export default function DeficitTracker({ session }) {  const userId = session.us
         }
         if (daysRes.data) {
           const sums = {};
-          daysRes.data.forEach(r => { sums[r.date] = { in: r.intake, ex: r.training, maint: r.maintenance, pro: r.protein, water: r.water || 0 }; });
+          daysRes.data.forEach(r => { sums[r.date] = { in: r.intake, ex: r.training, maint: r.maintenance, pro: r.protein, water: r.water || 0, hol: !!r.holiday }; });
           setSummaries(sums);
         }
         if (wRes.data) {
@@ -248,7 +250,7 @@ export default function DeficitTracker({ session }) {  const userId = session.us
           wRes.data.forEach(r => { ws[r.date] = Number(r.kg); });
           setWeights(ws);
         }
-        if (todayRes.data) { if (todayRes.data.entries) setDay(todayRes.data.entries); if (todayRes.data.water) setWater(todayRes.data.water); }
+        if (todayRes.data) { if (todayRes.data.entries) setDay(todayRes.data.entries); if (todayRes.data.water) setWater(todayRes.data.water); setHoliday(!!todayRes.data.holiday); }
       } catch {
         setError("Couldn't load your data — check your connection and refresh.");
       }
@@ -258,14 +260,16 @@ export default function DeficitTracker({ session }) {  const userId = session.us
   }, [userId]);
 
   // ---------- persistence ----------
-  const persistDay = async (newDay, newWater = water) => {
+  const persistDay = async (newDay, newWater = water, newHoliday = holiday) => {
     setDay(newDay);
-    const intake = newDay.food.reduce((s, f) => s + f.cal, 0);
+    const loggedIntake = newDay.food.reduce((s, f) => s + f.cal, 0);
     const pro = newDay.food.reduce((s, f) => s + (f.pro || 0), 0);
     const exTotal = newDay.exercise.reduce((s, e) => s + e.cal, 0);
-    setSummaries({ ...summaries, [date]: { in: intake, ex: exTotal, maint: settings.maintenance, pro, water: newWater } });
+    const burnT = settings.maintenance + exTotal;
+    const intake = newHoliday ? Math.max(loggedIntake, burnT + HOLIDAY_SURPLUS) : loggedIntake;
+    setSummaries({ ...summaries, [date]: { in: intake, ex: exTotal, maint: settings.maintenance, pro, water: newWater, hol: newHoliday } });
     const { error: err } = await supabase.from("days").upsert({
-      user_id: userId, date, intake, protein: pro, training: exTotal, maintenance: settings.maintenance, water: newWater, entries: newDay, updated_at: new Date().toISOString(),
+      user_id: userId, date, intake, protein: pro, training: exTotal, maintenance: settings.maintenance, water: newWater, holiday: newHoliday, entries: newDay, updated_at: new Date().toISOString(),
     });
     if (err) setError("Saving failed — your entry is shown but may not have synced.");
   };
@@ -274,6 +278,12 @@ export default function DeficitTracker({ session }) {  const userId = session.us
     const v = Math.max(0, n);
     setWater(v);
     await persistDay(day, v);
+  };
+
+  const toggleHoliday = async () => {
+    const v = !holiday;
+    setHoliday(v);
+    await persistDay(day, water, v);
   };
 
   const persistSettings = async (s) => {
@@ -328,23 +338,24 @@ export default function DeficitTracker({ session }) {  const userId = session.us
   };
 
   const fetchDay = async (key) => {
-    const { data } = await supabase.from("days").select("entries,water,maintenance").eq("user_id", userId).eq("date", key).maybeSingle();
-    return data ? { entries: data.entries, water: data.water || 0, maintenance: data.maintenance } : null;
+    const { data } = await supabase.from("days").select("entries,water,maintenance,holiday").eq("user_id", userId).eq("date", key).maybeSingle();
+    return data ? { entries: data.entries, water: data.water || 0, maintenance: data.maintenance, holiday: !!data.holiday } : null;
   };
 
   // edit/save any date (used to backfill or fix past days from History)
-  const persistDayFor = async (key, newEntries) => {
-    const intake = newEntries.food.reduce((s, f) => s + f.cal, 0);
+  const persistDayFor = async (key, newEntries, newHoliday = false) => {
+    const loggedIntake = newEntries.food.reduce((s, f) => s + f.cal, 0);
     const pro = newEntries.food.reduce((s, f) => s + (f.pro || 0), 0);
     const exTotal = newEntries.exercise.reduce((s, e) => s + e.cal, 0);
     const existing = summaries[key];
     // keep the day's own baseline if it already had one; otherwise use current setting
     const maint = existing && existing.maint ? existing.maint : settings.maintenance;
     const wtr = existing ? (existing.water || 0) : 0;
-    setSummaries(prev => ({ ...prev, [key]: { in: intake, ex: exTotal, maint, pro, water: wtr } }));
-    if (key === date) setDay(newEntries); // keep Today in sync if they edited today
+    const intake = newHoliday ? Math.max(loggedIntake, maint + exTotal + HOLIDAY_SURPLUS) : loggedIntake;
+    setSummaries(prev => ({ ...prev, [key]: { in: intake, ex: exTotal, maint, pro, water: wtr, hol: newHoliday } }));
+    if (key === date) { setDay(newEntries); setHoliday(newHoliday); } // keep Today in sync if they edited today
     const { error: err } = await supabase.from("days").upsert({
-      user_id: userId, date: key, intake, protein: pro, training: exTotal, maintenance: maint, water: wtr, entries: newEntries, updated_at: new Date().toISOString(),
+      user_id: userId, date: key, intake, protein: pro, training: exTotal, maintenance: maint, water: wtr, holiday: newHoliday, entries: newEntries, updated_at: new Date().toISOString(),
     });
     if (err) setError("Saving failed — your change may not have synced.");
   };
@@ -385,16 +396,17 @@ export default function DeficitTracker({ session }) {  const userId = session.us
   };
 
   // ---------- maths ----------
-  const intake = day.food.reduce((s, f) => s + f.cal, 0);
+  const loggedIntake = day.food.reduce((s, f) => s + f.cal, 0);
   const protein = day.food.reduce((s, f) => s + (f.pro || 0), 0);
   const exercise = day.exercise.reduce((s, e) => s + e.cal, 0);
   const burn = settings.maintenance + exercise;
+  const intake = holiday ? Math.max(loggedIntake, burn + HOLIDAY_SURPLUS) : loggedIntake;
   const net = burn - intake;
   // eat-to-target: how many calories you can still eat and still hit your deficit target
   const budget = Math.max(0, burn - settings.target);   // calories you may eat today to land on −target
   const remaining = budget - intake;                     // + = still room, − = past your target budget
   const eatPct = budget > 0 ? Math.min(intake / budget, 1.35) : 0;
-  const underFuelled = exercise >= 500 && (net > 1000 || intake < burn * 0.5);
+  const underFuelled = !holiday && exercise >= 500 && (net > 1000 || intake < burn * 0.5);
   const lastWeights = Object.keys(weights).sort();
   const latestW = lastWeights.length ? weights[lastWeights[lastWeights.length - 1]] : null;
 
@@ -461,7 +473,7 @@ export default function DeficitTracker({ session }) {  const userId = session.us
             <div className="card-in" style={{ ...cardStyle, background: "linear-gradient(160deg, rgba(46,124,246,0.10), rgba(255,255,255,0.03) 55%)", padding: "22px 20px" }}>
               <div style={{ display: "flex", justifyContent: "space-between", ...labelStyle, color: T.sub, marginBottom: 8 }}>
                 <span>{new Date().toLocaleDateString([], { weekday: "long", day: "numeric", month: "long", year: "numeric" })}</span>
-                <span style={{ color: net >= 0 ? T.good : T.bad }}>{net >= 0 ? "In deficit" : "Over budget"}</span>
+                <span style={{ color: holiday ? T.amber : net >= 0 ? T.good : T.bad }}>{holiday ? "🏖 Holiday" : net >= 0 ? "In deficit" : "Over budget"}</span>
               </div>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
                 <div style={{ ...numFont, fontSize: 62, fontWeight: 700, lineHeight: 1, color: net >= 0 ? T.good : T.bad, textShadow: net >= 0 ? "0 0 24px rgba(61,220,132,0.35)" : "0 0 24px rgba(255,92,92,0.3)" }}>
@@ -471,18 +483,33 @@ export default function DeficitTracker({ session }) {  const userId = session.us
                 <Ring net={net} target={settings.target} />
               </div>
               <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid rgba(255,255,255,0.08)" }}>
-                <div style={{ fontSize: 13, fontWeight: 500, color: T.text, marginBottom: 8 }}>
-                  {remaining >= 0
-                    ? <>You can still eat <span style={{ color: T.good, fontWeight: 700 }}>{fmt(remaining)} kcal</span> and stay on target</>
-                    : <><span style={{ color: T.bad, fontWeight: 700 }}>{fmt(Math.abs(remaining))} kcal</span> over your target budget today</>}
-                </div>
-                <div style={{ position: "relative", height: 10, borderRadius: 5, background: "rgba(255,255,255,0.07)", overflow: "hidden" }}>
-                  <div style={{ position: "absolute", inset: 0, width: `${Math.min(eatPct, 1) * 100}%`, background: remaining >= 0 ? GRAD_FUEL : "linear-gradient(135deg,#E8431F,#FF7B42)", transition: "width .5s cubic-bezier(.2,.7,.2,1)" }} />
-                  {eatPct > 1 && <div style={{ position: "absolute", top: 0, bottom: 0, left: `${(1 / eatPct) * 100}%`, right: 0, background: T.bad }} />}
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: T.sub, marginTop: 6 }}>
-                  <span>Eaten {fmt(intake)}</span><span>Budget {fmt(budget)}</span>
-                </div>
+                {holiday ? (
+                  <div style={{ fontSize: 13, fontWeight: 500, color: "#FFD394", lineHeight: 1.5 }}>
+                    🏖 Holiday day — assuming you ate <strong>{fmt(HOLIDAY_SURPLUS)} kcal over</strong> your {fmt(burn)} burn. No need to log meals today.
+                  </div>
+                ) : (
+                  <>
+                    <div style={{ fontSize: 13, fontWeight: 500, color: T.text, marginBottom: 8 }}>
+                      {remaining >= 0
+                        ? <>You can still eat <span style={{ color: T.good, fontWeight: 700 }}>{fmt(remaining)} kcal</span> and stay on target</>
+                        : <><span style={{ color: T.bad, fontWeight: 700 }}>{fmt(Math.abs(remaining))} kcal</span> over your target budget today</>}
+                    </div>
+                    <div style={{ position: "relative", height: 10, borderRadius: 5, background: "rgba(255,255,255,0.07)", overflow: "hidden" }}>
+                      <div style={{ position: "absolute", inset: 0, width: `${Math.min(eatPct, 1) * 100}%`, background: remaining >= 0 ? GRAD_FUEL : "linear-gradient(135deg,#E8431F,#FF7B42)", transition: "width .5s cubic-bezier(.2,.7,.2,1)" }} />
+                      {eatPct > 1 && <div style={{ position: "absolute", top: 0, bottom: 0, left: `${(1 / eatPct) * 100}%`, right: 0, background: T.bad }} />}
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: T.sub, marginTop: 6 }}>
+                      <span>Eaten {fmt(intake)}</span><span>Budget {fmt(budget)}</span>
+                    </div>
+                  </>
+                )}
+                <button onClick={toggleHoliday}
+                  style={{ width: "100%", marginTop: 12, padding: "9px", borderRadius: 10, cursor: "pointer", fontSize: 13, fontWeight: 700,
+                    border: holiday ? "none" : `1px solid ${T.glassBorder}`,
+                    background: holiday ? "linear-gradient(135deg,#B45309,#FFB454)" : "rgba(255,255,255,0.05)",
+                    color: holiday ? "#fff" : T.sub }}>
+                  {holiday ? "✓ Holiday day — tap to turn off" : "🏖 Mark today as a holiday day"}
+                </button>
               </div>
 
               <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8, marginTop: 12 }}>
@@ -1186,6 +1213,7 @@ function History({ summaries, maintenance, weights, onApplyBaseline, fetchDay, p
   const [sel, setSel] = useState(null);
   const [applied, setApplied] = useState(false);
   const [edit, setEdit] = useState(null); // { food:[], exercise:[] } when editing the open day
+  const [holEdit, setHolEdit] = useState(false); // holiday flag while editing
   const [fDraft, setFDraft] = useState({ name: "", cal: "", pro: "" });
   const [eDraft, setEDraft] = useState({ type: "Run", desc: "", cal: "" });
   const [saving, setSaving] = useState(false);
@@ -1201,11 +1229,11 @@ function History({ summaries, maintenance, weights, onApplyBaseline, fetchDay, p
     setEdit(null);
     try {
       const r = await fetchDay(key);
-      setSel({ key, loading: false, data: r ? r.entries : null });
-    } catch { setSel({ key, loading: false, data: null }); }
+      setSel({ key, loading: false, data: r ? r.entries : null, holiday: r ? r.holiday : false });
+    } catch { setSel({ key, loading: false, data: null, holiday: false }); }
   };
 
-  const startEdit = () => setEdit(sel.data ? { food: [...sel.data.food], exercise: [...sel.data.exercise] } : { food: [], exercise: [] });
+  const startEdit = () => { setHolEdit(!!sel.holiday); setEdit(sel.data ? { food: [...sel.data.food], exercise: [...sel.data.exercise] } : { food: [], exercise: [] }); };
   const cancelEdit = () => { setEdit(null); setFDraft({ name: "", cal: "", pro: "" }); setEDraft({ type: "Run", desc: "", cal: "" }); };
 
   const editAddPreset = (p) => setEdit(e => ({ ...e, food: [...e.food, { id: Math.random().toString(36).slice(2, 9), name: p.name, cal: p.cal, pro: p.pro || 0, src: "preset" }] }));
@@ -1216,8 +1244,8 @@ function History({ summaries, maintenance, weights, onApplyBaseline, fetchDay, p
 
   const saveEdit = async () => {
     setSaving(true);
-    await persistDayFor(sel.key, edit);
-    setSel(s => ({ ...s, data: edit }));
+    await persistDayFor(sel.key, edit, holEdit);
+    setSel(s => ({ ...s, data: edit, holiday: holEdit }));
     setEdit(null); setFDraft({ name: "", cal: "", pro: "" }); setEDraft({ type: "Run", desc: "", cal: "" });
     setSaving(false);
   };
@@ -1256,7 +1284,7 @@ function History({ summaries, maintenance, weights, onApplyBaseline, fetchDay, p
         const s = summaries[keyFor(cur)];
         // use the baseline FROZEN on the day it was logged — never the current setting,
         // otherwise accepting a correction shifts the prediction and the suggestion runs away
-        if (s && s.maint) { predicted += s.maint + s.ex - s.in; loggedDays++; }
+        if (s && s.maint && !s.hol) { predicted += s.maint + s.ex - s.in; loggedDays++; }
         cur.setDate(cur.getDate() + 1);
       }
 
@@ -1270,7 +1298,7 @@ function History({ summaries, maintenance, weights, onApplyBaseline, fetchDay, p
         // average stored baseline across the window — the figure these predictions were built on
         let baseSum = 0, baseN = 0;
         const c2 = new Date(anchorKey + "T12:00:00");
-        while (c2 <= end) { const s = summaries[keyFor(c2)]; if (s && s.maint) { baseSum += s.maint; baseN++; } c2.setDate(c2.getDate() + 1); }
+        while (c2 <= end) { const s = summaries[keyFor(c2)]; if (s && s.maint && !s.hol) { baseSum += s.maint; baseN++; } c2.setDate(c2.getDate() + 1); }
         const avgBaseline = baseN ? Math.round(baseSum / baseN) : maintenance;
         calib = { spanDays, actualKg, predictedKg, driftPerDay, capped, suggested: avgBaseline + driftPerDay, alreadyClose: Math.abs(rawDrift) < 100 };
       } else {
@@ -1417,7 +1445,7 @@ function History({ summaries, maintenance, weights, onApplyBaseline, fetchDay, p
               <div style={{ ...label, color: T.text }}>
                 {new Date(sel.key + "T12:00:00").toLocaleDateString([], { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
               </div>
-              {!sel.loading && !edit && <button onClick={startEdit} style={{ ...navBtn, fontSize: 13, fontWeight: 700, padding: "7px 14px" }}>{sel.data && (sel.data.food.length || sel.data.exercise.length) ? "Edit day" : "Add entries"}</button>}
+              {!sel.loading && !edit && <button onClick={startEdit} style={{ ...navBtn, fontSize: 13, fontWeight: 700, padding: "7px 14px" }}>{(sel.data && (sel.data.food.length || sel.data.exercise.length)) || sel.holiday ? "Edit day" : "Add entries"}</button>}
             </div>
 
             {sel.loading ? (
@@ -1464,16 +1492,29 @@ function History({ summaries, maintenance, weights, onApplyBaseline, fetchDay, p
                   <button onClick={editAddEx} style={{ ...navBtn, fontWeight: 700, color: T.burn }}>+</button>
                 </div>
 
-                <div style={{ display: "flex", gap: 10, marginTop: 14 }}>
+                <button onClick={() => setHolEdit(h => !h)}
+                  style={{ width: "100%", marginTop: 12, padding: "10px", borderRadius: 11, cursor: "pointer", fontSize: 13, fontWeight: 700,
+                    border: holEdit ? "none" : `1px solid ${T.glassBorder}`,
+                    background: holEdit ? "linear-gradient(135deg,#B45309,#FFB454)" : "rgba(255,255,255,0.05)",
+                    color: holEdit ? "#fff" : T.sub }}>
+                  {holEdit ? "✓ Holiday day (assumes +500 over burn) — tap to turn off" : "🏖 Mark as a holiday day"}
+                </button>
+
+                <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
                   <button onClick={cancelEdit} style={{ flex: 1, padding: "12px", borderRadius: 12, border: `1px solid ${T.glassBorder}`, background: "rgba(255,255,255,0.06)", color: T.text, fontSize: 14, fontWeight: 700, cursor: "pointer" }}>Cancel</button>
                   <button onClick={saveEdit} disabled={saving} style={{ flex: 2, padding: "12px", borderRadius: 12, border: "none", background: "linear-gradient(135deg,#2E7CF6,#4DA3FF)", color: "#fff", fontSize: 14, fontWeight: 700, cursor: "pointer", opacity: saving ? 0.6 : 1, boxShadow: "0 6px 20px rgba(46,124,246,0.35)" }}>{saving ? "Saving…" : "Save day"}</button>
                 </div>
               </>
             ) : !sel.data || (sel.data.food.length === 0 && sel.data.exercise.length === 0) ? (
-              <p style={{ fontSize: 14, color: T.sub, margin: 0 }}>Nothing logged this day.{weights[sel.key] ? ` Weight: ${weights[sel.key]} kg.` : ""} Tap "Add entries" to fill it in.</p>
+              sel.holiday ? (
+                <div style={{ fontSize: 14, color: "#FFD394", lineHeight: 1.5 }}>🏖 Holiday day — assumed +{HOLIDAY_SURPLUS} kcal over burn.{weights[sel.key] ? ` Weight: ${weights[sel.key]} kg.` : ""} Tap "Edit day" to change it.</div>
+              ) : (
+                <p style={{ fontSize: 14, color: T.sub, margin: 0 }}>Nothing logged this day.{weights[sel.key] ? ` Weight: ${weights[sel.key]} kg.` : ""} Tap "Add entries" to fill it in.</p>
+              )
             ) : (
               /* ---- VIEW MODE ---- */
               <>
+                {sel.holiday && <div style={{ display: "inline-block", fontSize: 12, fontWeight: 700, color: "#FFD394", background: "rgba(255,180,84,0.12)", border: "1px solid rgba(255,180,84,0.3)", borderRadius: 8, padding: "4px 10px", marginBottom: 10 }}>🏖 Holiday day · assumed +{HOLIDAY_SURPLUS} over burn</div>}
                 {selNet !== null && (
                   <div style={{ fontSize: 15, marginBottom: 10 }}>
                     Net: <strong style={{ color: selNet >= 0 ? T.good : T.bad }}>{selNet >= 0 ? "−" : "+"}{Math.abs(Math.round(selNet)).toLocaleString()} kcal</strong>
