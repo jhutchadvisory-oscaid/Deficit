@@ -395,6 +395,19 @@ export default function DeficitTracker({ session }) {  const userId = session.us
     if (err) setError("Saving failed — weight may not have synced.");
   };
 
+  // set or clear a weigh-in on any date (used to backfill a true starting weight from History)
+  const logWeightFor = async (key, kg) => {
+    if (kg == null) {
+      const next = { ...weights }; delete next[key]; setWeights(next);
+      await supabase.from("weights").delete().eq("user_id", userId).eq("date", key);
+      return;
+    }
+    if (kg < 30 || kg > 250) { setError("Enter a weight between 30 and 250 kg."); return; }
+    setWeights({ ...weights, [key]: kg });
+    const { error: err } = await supabase.from("weights").upsert({ user_id: userId, date: key, kg });
+    if (err) setError("Saving failed — weight may not have synced.");
+  };
+
   // ---------- maths ----------
   const loggedIntake = day.food.reduce((s, f) => s + f.cal, 0);
   const protein = day.food.reduce((s, f) => s + (f.pro || 0), 0);
@@ -637,7 +650,7 @@ export default function DeficitTracker({ session }) {  const userId = session.us
           </>
         )}
 
-        {tab === "history" && <History summaries={summaries} maintenance={settings.maintenance} weights={weights} onApplyBaseline={applyBaseline} fetchDay={fetchDay} persistDayFor={persistDayFor} presets={settings.presets || []} />}
+        {tab === "history" && <History summaries={summaries} maintenance={settings.maintenance} weights={weights} onApplyBaseline={applyBaseline} fetchDay={fetchDay} persistDayFor={persistDayFor} presets={settings.presets || []} logWeightFor={logWeightFor} />}
 
         {tab === "board" && <Board summaries={summaries} weights={weights} settings={settings} net={net} protein={protein} exercise={exercise} fetchDay={fetchDay} />}
 
@@ -1394,7 +1407,7 @@ function Board({ summaries, weights, settings, net, protein, exercise, fetchDay 
 }
 
 // ---------- history: trend + calibration + calendar ----------
-function History({ summaries, maintenance, weights, onApplyBaseline, fetchDay, persistDayFor, presets }) {
+function History({ summaries, maintenance, weights, onApplyBaseline, fetchDay, persistDayFor, presets, logWeightFor }) {
   const [month, setMonth] = useState(() => { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), 1); });
   const [sel, setSel] = useState(null);
   const [applied, setApplied] = useState(false);
@@ -1402,6 +1415,7 @@ function History({ summaries, maintenance, weights, onApplyBaseline, fetchDay, p
   const [holEdit, setHolEdit] = useState(false); // holiday flag while editing
   const [fDraft, setFDraft] = useState({ name: "", cal: "", pro: "" });
   const [eDraft, setEDraft] = useState({ type: "Run", desc: "", cal: "" });
+  const [wDraft, setWDraft] = useState("");
   const [saving, setSaving] = useState(false);
 
   const keyFor = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -1419,8 +1433,8 @@ function History({ summaries, maintenance, weights, onApplyBaseline, fetchDay, p
     } catch { setSel({ key, loading: false, data: null, holiday: false }); }
   };
 
-  const startEdit = () => { setHolEdit(!!sel.holiday); setEdit(sel.data ? { food: [...sel.data.food], exercise: [...sel.data.exercise] } : { food: [], exercise: [] }); };
-  const cancelEdit = () => { setEdit(null); setFDraft({ name: "", cal: "", pro: "" }); setEDraft({ type: "Run", desc: "", cal: "" }); };
+  const startEdit = () => { setHolEdit(!!sel.holiday); setWDraft(weights[sel.key] != null ? String(weights[sel.key]) : ""); setEdit(sel.data ? { food: [...sel.data.food], exercise: [...sel.data.exercise] } : { food: [], exercise: [] }); };
+  const cancelEdit = () => { setEdit(null); setFDraft({ name: "", cal: "", pro: "" }); setEDraft({ type: "Run", desc: "", cal: "" }); setWDraft(""); };
 
   const editAddPreset = (p) => setEdit(e => ({ ...e, food: [...e.food, { id: Math.random().toString(36).slice(2, 9), name: p.name, cal: p.cal, pro: p.pro || 0, src: "preset" }] }));
   const editAddFood = () => { const cal = parseInt(fDraft.cal, 10); if (!fDraft.name.trim() || !cal) return; setEdit(e => ({ ...e, food: [...e.food, { id: Math.random().toString(36).slice(2, 9), name: fDraft.name.trim(), cal, pro: parseInt(fDraft.pro, 10) || 0, src: "manual" }] })); setFDraft({ name: "", cal: "", pro: "" }); };
@@ -1431,8 +1445,13 @@ function History({ summaries, maintenance, weights, onApplyBaseline, fetchDay, p
   const saveEdit = async () => {
     setSaving(true);
     await persistDayFor(sel.key, edit, holEdit);
+    // save/clear the weigh-in for this day
+    const wv = wDraft.trim() ? parseFloat(wDraft.replace(",", ".")) : null;
+    if (wv !== (weights[sel.key] != null ? weights[sel.key] : null)) {
+      await logWeightFor(sel.key, wv && !isNaN(wv) ? wv : null);
+    }
     setSel(s => ({ ...s, data: edit, holiday: holEdit }));
-    setEdit(null); setFDraft({ name: "", cal: "", pro: "" }); setEDraft({ type: "Run", desc: "", cal: "" });
+    setEdit(null); setFDraft({ name: "", cal: "", pro: "" }); setEDraft({ type: "Run", desc: "", cal: "" }); setWDraft("");
     setSaving(false);
   };
 
@@ -1676,6 +1695,11 @@ function History({ summaries, maintenance, weights, onApplyBaseline, fetchDay, p
                   <input style={{ ...inStyle, flex: 1.4 }} placeholder="note" value={eDraft.desc} onChange={e => setEDraft({ ...eDraft, desc: e.target.value })} />
                   <input style={{ ...inStyle, flex: 1 }} placeholder="kcal" inputMode="numeric" value={eDraft.cal} onChange={e => setEDraft({ ...eDraft, cal: e.target.value.replace(/\D/g, "") })} />
                   <button onClick={editAddEx} style={{ ...navBtn, fontWeight: 700, color: T.burn }}>+</button>
+                </div>
+
+                <div style={{ display: "flex", gap: 8, marginTop: 12, alignItems: "center" }}>
+                  <span style={{ fontSize: 13, color: T.sub, flexShrink: 0 }}>⚖️ Weigh-in</span>
+                  <input style={{ ...inStyle, flex: 1, ...numFont, fontWeight: 700 }} placeholder="kg (optional)" inputMode="decimal" value={wDraft} onChange={e => setWDraft(e.target.value.replace(/[^\d.,]/g, ""))} />
                 </div>
 
                 <button onClick={() => setHolEdit(h => !h)}
