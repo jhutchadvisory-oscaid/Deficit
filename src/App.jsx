@@ -841,13 +841,190 @@ const METRICS = {
   protein:  { label: "Protein",     unit: "g",    type: "line", color: "#B7A6FF" },
   weight:   { label: "Weight",      unit: "kg",   type: "line", color: "#3DDC84" },
 };
-const RANGES = [[7, "7d"], [14, "14d"], [30, "30d"], [90, "90d"]];
+const RANGES = [[7, "7d"], [14, "14d"], [30, "30d"], [90, "90d"], [183, "6mo"], [365, "12mo"]];
+const rangeLabel = (n) => n === 183 ? "6 months" : n === 365 ? "12 months" : `${n} days`;
+
+function ShareSheet({ onClose, data }) {
+  const { lostKg, startW, latestW, equiv, streak, wk, avg7, avgLabel } = data;
+  const [preset, setPreset] = useState(lostKg != null ? "weight" : "streak");
+  const [shape, setShape] = useState("portrait"); // portrait | square
+  const [showWeight, setShowWeight] = useState(false);
+  const [custom, setCustom] = useState({ lost: true, streak: true, avg: true });
+  const [busy, setBusy] = useState(false);
+  let node = null;
+
+  const isP = shape === "portrait";
+  const W = 1080, H = isP ? 1920 : 1080; // export resolution
+  const scale = isP ? 0.28 : 0.34;       // on-screen preview scale
+  const pad = isP ? 84 : 76;
+
+  const logo = (size) => (
+    <span style={{ ...numFont, fontWeight: 700, letterSpacing: "0.04em", color: "#fff", fontSize: size }}>DEFICIT<span style={{ color: "#FF6B35" }}>.</span></span>
+  );
+  const cardBg = {
+    background: "radial-gradient(120% 90% at 15% 0%, rgba(46,124,246,0.16), transparent 55%), radial-gradient(120% 90% at 100% 100%, rgba(61,220,132,0.12), transparent 50%), linear-gradient(160deg, #0E1626, #0A0F1A 70%)",
+    border: "1px solid rgba(255,255,255,0.09)",
+  };
+  const pill = (bg, color, txt) => <span style={{ display: "inline-flex", alignItems: "center", padding: "12px 24px", borderRadius: 999, fontSize: 30, fontWeight: 600, background: bg, color }}>{txt}</span>;
+
+  const renderCard = () => {
+    const common = { width: W, height: H, padding: pad, boxSizing: "border-box", display: "flex", flexDirection: "column", borderRadius: 64, overflow: "hidden", fontFamily: "'Inter',sans-serif", ...cardBg };
+    const num = (fs, color, glow) => ({ ...numFont, fontWeight: 700, lineHeight: 0.92, fontSize: fs, color, textShadow: glow ? `0 0 60px ${glow}` : "none" });
+
+    if (preset === "weight") {
+      return (
+        <div style={common}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>{logo(isP ? 66 : 56)}{pill("rgba(61,220,132,0.14)", "#3DDC84", "On track")}</div>
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "center" }}>
+            <div style={{ textTransform: "uppercase", letterSpacing: "0.16em", fontSize: 34, color: "#8B95A7", marginBottom: 30 }}>Weight lost</div>
+            <div style={num(isP ? 300 : 240, "#3DDC84", "rgba(61,220,132,0.3)")}>{lostKg != null ? lostKg.toFixed(1) : "—"}<span style={{ fontSize: isP ? 100 : 84, color: "#8B95A7", marginLeft: 16 }}>kg</span></div>
+            <div style={{ fontSize: 40, color: "#B9C2D0", marginTop: 40, lineHeight: 1.4 }}>about the weight of <b style={{ color: "#fff" }}>{equiv}</b></div>
+            {showWeight && startW != null && latestW != null && <div style={{ fontSize: 32, color: "#6B7688", marginTop: 26 }}>{startW} → {latestW} kg</div>}
+          </div>
+          <div style={{ fontSize: 32, color: "#6B7688", letterSpacing: "0.02em" }}>Fuel in · Training out</div>
+        </div>
+      );
+    }
+    if (preset === "week") {
+      return (
+        <div style={common}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>{logo(isP ? 66 : 56)}{pill("rgba(255,180,84,0.14)", "#FFB454", "This week")}</div>
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "center" }}>
+            <div style={{ textTransform: "uppercase", letterSpacing: "0.16em", fontSize: 34, color: "#8B95A7", marginBottom: 26 }}>This week's deficit</div>
+            <div style={num(isP ? 220 : 180, "#3DDC84", "rgba(61,220,132,0.3)")}>{wk.net >= 0 ? "−" : "+"}{Math.abs(wk.net).toLocaleString()}</div>
+            <div style={{ display: "flex", gap: 30, marginTop: 60 }}>
+              <div style={{ flex: 1, background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 36, padding: 40 }}>
+                <div style={num(76, "#4DA3FF")}>{wk.out.toLocaleString()}</div><div style={{ fontSize: 28, color: "#8B95A7", marginTop: 10 }}>Burned</div>
+              </div>
+              <div style={{ flex: 1, background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 36, padding: 40 }}>
+                <div style={num(76, "#4DA3FF")}>{wk.in.toLocaleString()}</div><div style={{ fontSize: 28, color: "#8B95A7", marginTop: 10 }}>Eaten</div>
+              </div>
+            </div>
+          </div>
+          <div style={{ fontSize: 32, color: "#6B7688" }}>Mon–Sun · {wk.daysLogged} days logged</div>
+        </div>
+      );
+    }
+    if (preset === "streak") {
+      return (
+        <div style={{ ...common, alignItems: "center", textAlign: "center" }}>
+          <div style={{ alignSelf: "stretch", display: "flex", justifyContent: "space-between", alignItems: "center" }}>{logo(isP ? 66 : 56)}<span /></div>
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "center" }}>
+            <div style={{ fontSize: isP ? 150 : 120 }}>🔥</div>
+            <div style={num(isP ? 360 : 280, "#FFB454", "rgba(255,180,84,0.35)")}>{streak}</div>
+            <div style={{ textTransform: "uppercase", letterSpacing: "0.16em", fontSize: 38, color: "#8B95A7", marginTop: 8 }}>week{streak === 1 ? "" : "s"} on target</div>
+          </div>
+          <div style={{ fontSize: 32, color: "#6B7688" }}>Consistency wins</div>
+        </div>
+      );
+    }
+    const rows = [];
+    if (custom.lost && lostKg != null) rows.push(["#3DDC84", `−${lostKg.toFixed(1)}`, "kg", "lost"]);
+    if (custom.streak) rows.push(["#FFB454", `${streak}`, " wk", "streak"]);
+    if (custom.avg && avg7 != null) rows.push(["#4DA3FF", `${avg7 >= 0 ? "−" : "+"}${Math.abs(Math.round(avg7)).toLocaleString()}`, "", avgLabel]);
+    return (
+      <div style={common}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>{logo(isP ? 66 : 56)}{pill("rgba(46,124,246,0.14)", "#4DA3FF", "My progress")}</div>
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "center", gap: 44 }}>
+          {rows.length === 0 ? <div style={{ fontSize: 40, color: "#8B95A7" }}>Pick at least one stat below.</div> : rows.map((r, i) => (
+            <div key={i} style={{ display: "flex", alignItems: "baseline", gap: 24 }}>
+              <span style={{ ...numFont, fontWeight: 700, fontSize: 120, color: r[0], lineHeight: 0.9 }}>{r[1]}<span style={{ fontSize: 44, color: "#8B95A7" }}>{r[2]}</span></span>
+              <span style={{ fontSize: 34, color: "#8B95A7" }}>{r[3]}</span>
+            </div>
+          ))}
+        </div>
+        <div style={{ fontSize: 32, color: "#6B7688" }}>Fuel in · Training out</div>
+      </div>
+    );
+  };
+
+  const save = async () => {
+    if (!node) return;
+    setBusy(true);
+    const prevTransform = node.style.transform;
+    const prevOrigin = node.style.transformOrigin;
+    try {
+      const mod = await import("html-to-image");
+      // capture at full 1:1 resolution — remove the preview scale during capture
+      node.style.transform = "none";
+      node.style.transformOrigin = "top left";
+      // let the layout settle, then render (twice — first pass warms font/style caching)
+      await new Promise(r => setTimeout(r, 60));
+      await mod.toPng(node, { width: W, height: H, pixelRatio: 1, cacheBust: true, backgroundColor: "#0A0F1A" });
+      const dataUrl = await mod.toPng(node, { width: W, height: H, pixelRatio: 1, cacheBust: true, backgroundColor: "#0A0F1A" });
+      const a = document.createElement("a");
+      a.href = dataUrl;
+      a.download = `deficit-${preset}-${new Date().toISOString().slice(0, 10)}.png`;
+      document.body.appendChild(a); a.click(); a.remove();
+    } catch (e) {
+      alert("Couldn't generate the image — please try again.");
+    } finally {
+      node.style.transform = prevTransform;
+      node.style.transformOrigin = prevOrigin;
+      setBusy(false);
+    }
+  };
+
+  const chip = (active, onClick, label) => (
+    <button onClick={onClick} style={{ padding: "9px 15px", borderRadius: 999, border: active ? "none" : `1px solid ${T.glassBorder}`, background: active ? GRAD_BURN : "rgba(255,255,255,0.05)", color: active ? "#fff" : T.sub, fontSize: 13, fontWeight: 700, cursor: "pointer" }}>{label}</button>
+  );
+  const toggle = (on, onClick, label) => (
+    <button onClick={onClick} style={{ padding: "9px 15px", borderRadius: 999, border: on ? "none" : `1px solid ${T.glassBorder}`, background: on ? "rgba(61,220,132,0.18)" : "rgba(255,255,255,0.05)", color: on ? T.good : T.sub, fontSize: 13, fontWeight: 700, cursor: "pointer" }}>{on ? "✓ " : ""}{label}</button>
+  );
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(5,8,14,0.8)", backdropFilter: "blur(6px)", WebkitBackdropFilter: "blur(6px)", zIndex: 60, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, overflowY: "auto" }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: "#0E1626", border: `1px solid ${T.glassBorder}`, borderRadius: 24, padding: 20, width: "100%", maxWidth: 460, boxSizing: "border-box", maxHeight: "92vh", overflowY: "auto" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <div style={{ ...labelStyle, color: T.text }}>Share your progress</div>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: T.sub, cursor: "pointer", fontSize: 16 }}>✕</button>
+        </div>
+
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+          {chip(preset === "weight", () => setPreset("weight"), "Weight lost")}
+          {chip(preset === "week", () => setPreset("week"), "This week")}
+          {chip(preset === "streak", () => setPreset("streak"), "Streak")}
+          {chip(preset === "custom", () => setPreset("custom"), "Custom")}
+        </div>
+        <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
+          {chip(shape === "portrait", () => setShape("portrait"), "Portrait")}
+          {chip(shape === "square", () => setShape("square"), "Square")}
+        </div>
+
+        {preset === "weight" && (
+          <div style={{ marginBottom: 14 }}>{toggle(showWeight, () => setShowWeight(v => !v), "Show my weight numbers")}</div>
+        )}
+        {preset === "custom" && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 14 }}>
+            {toggle(custom.lost, () => setCustom(c => ({ ...c, lost: !c.lost })), "Weight lost")}
+            {toggle(custom.streak, () => setCustom(c => ({ ...c, streak: !c.streak })), "Streak")}
+            {toggle(custom.avg, () => setCustom(c => ({ ...c, avg: !c.avg })), "7-day average")}
+          </div>
+        )}
+
+        <div style={{ display: "flex", justifyContent: "center", background: "rgba(0,0,0,0.25)", borderRadius: 16, padding: 16, marginBottom: 16, overflow: "hidden" }}>
+          <div style={{ width: W * scale, height: H * scale, position: "relative" }}>
+            <div ref={n => { node = n; }} style={{ position: "absolute", top: 0, left: 0, transform: `scale(${scale})`, transformOrigin: "top left" }}>
+              {renderCard()}
+            </div>
+          </div>
+        </div>
+
+        <button onClick={save} disabled={busy} style={{ ...btn(GRAD_FUEL), width: "100%", opacity: busy ? 0.6 : 1, boxShadow: "0 6px 20px rgba(46,124,246,0.35)" }}>
+          {busy ? "Creating image…" : "💾  Save to photos"}
+        </button>
+        <div style={{ fontSize: 12, color: T.faint, textAlign: "center", marginTop: 10, lineHeight: 1.5 }}>Saves a high-res PNG to your downloads / photos. No name or email is included.</div>
+      </div>
+    </div>
+  );
+}
 
 function Board({ summaries, weights, settings, net, protein, exercise, fetchDay }) {
   const [metric, setMetric] = useState("net");
   const [range, setRange] = useState(30);
   const [hover, setHover] = useState(null);   // index into series
   const [sel, setSel] = useState(null);       // { key, loading, data }
+  const [share, setShare] = useState(false);
 
   const keyFor = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 
@@ -972,7 +1149,16 @@ function Board({ summaries, weights, settings, net, protein, exercise, fetchDay 
 
   return (
     <>
-      <div className="card-in" style={{ ...labelStyle, color: T.sub, marginBottom: 12 }}>The Board · tap any day for its breakdown</div>
+      <div className="card-in" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+        <span style={{ ...labelStyle, color: T.sub }}>The Board · tap any day</span>
+        <button onClick={() => setShare(true)} style={{ display: "inline-flex", alignItems: "center", gap: 7, padding: "8px 14px", borderRadius: 999, border: "none", background: GRAD_BURN, color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer", boxShadow: "0 6px 18px rgba(232,67,31,0.3)" }}>↗ Share</button>
+      </div>
+      {share && <ShareSheet onClose={() => setShare(false)} data={{
+        lostKg: (startW != null && latestW != null && startW - latestW > 0) ? startW - latestW : null,
+        startW, latestW,
+        equiv: (startW != null && latestW != null && startW - latestW > 0) ? lossEquiv(startW - latestW) : "",
+        streak, wk, avg7, avgLabel: "avg/day · 7 days",
+      }} />}
 
       {/* KPI tiles — tap to switch the chart metric */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 12, marginBottom: 14 }}>
@@ -1061,10 +1247,10 @@ function Board({ summaries, weights, settings, net, protein, exercise, fetchDay 
               </button>
             ))}
           </div>
-          <div style={{ display: "flex", gap: 6 }}>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
             {RANGES.map(([n, lbl]) => (
               <button key={n} onClick={() => { setRange(n); setHover(null); }}
-                style={{ padding: "7px 12px", borderRadius: 999, border: "none", background: range === n ? "linear-gradient(135deg,#E8431F,#FF7B42)" : "rgba(255,255,255,0.05)", color: range === n ? "#fff" : T.sub, fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+                style={{ padding: "7px 11px", borderRadius: 999, border: "none", background: range === n ? "linear-gradient(135deg,#E8431F,#FF7B42)" : "rgba(255,255,255,0.05)", color: range === n ? "#fff" : T.sub, fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
                 {lbl}
               </button>
             ))}
@@ -1082,7 +1268,7 @@ function Board({ summaries, weights, settings, net, protein, exercise, fetchDay 
             </>
           ) : (
             <span style={{ fontSize: 14, color: T.sub }}>
-              {avgRange != null ? <>Average over {range} days: <strong style={{ color: T.text }}>{metric === "net" ? (avgRange >= 0 ? "−" : "+") : ""}{metric === "weight" ? avgRange.toFixed(1) : fmt(Math.abs(avgRange))} {cfg.unit}</strong> · tap a day for detail</> : "No data in this range yet"}
+              {avgRange != null ? <>Average over {rangeLabel(range)}: <strong style={{ color: T.text }}>{metric === "net" ? (avgRange >= 0 ? "−" : "+") : ""}{metric === "weight" ? avgRange.toFixed(1) : fmt(Math.abs(avgRange))} {cfg.unit}</strong> · tap a day for detail</> : "No data in this range yet"}
             </span>
           )}
         </div>
