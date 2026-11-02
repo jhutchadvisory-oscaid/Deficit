@@ -6,19 +6,21 @@ const T = {
 const GRAD_FUEL = "linear-gradient(135deg,#2E7CF6,#4DA3FF)";
 
 const SLIDES = [
-  { icon: "⚖️", color: T.good, title: "Know your balance", body: "Every day is simple: calories in from food, calories out from your baseline burn plus training. The big green number is your deficit — that's what loses weight." },
-  { icon: "📷", color: T.fuel, title: "Log food in seconds", body: "Snap a photo or describe a meal and AI estimates the calories and protein. Your Huels, sandwich and coffees are one-tap presets — edit them anytime in Setup." },
-  { icon: "🏃", color: T.burn, title: "Training counts", body: "After each session, copy the active calories from your Garmin into Training. Log as many as you like in a day — they add to your burn." },
-  { icon: "🎯", color: T.amber, title: "Calibrate with weight", body: "Log your morning weight a few times a week. Over time the app compares real weight loss to what your deficits predict, and corrects your true daily burn — so it gets more accurate, not less." },
-  { icon: "🔋", color: T.fuel, title: "Fuel the big sessions", body: "Heading out for a long run or ride? The Fuel tab tells you exactly what to eat before, during and after — so you diet without wrecking your training." },
+  { icon: "⚖️", color: T.good, title: "Know your balance", body: "Every day comes down to calories in from food against calories out from your baseline burn plus training. The big green number is your deficit, and that's what takes weight off." },
+  { icon: "🍽", color: T.fuel, title: "Log food in a few taps", body: "Your regular meals and drinks become one-tap presets, which you can set up in Setup. Anything else goes in by hand with its calories and protein, and the bar under your balance shows how much you can still eat and stay on target." },
+  { icon: "🏃", color: T.burn, title: "Training counts", body: "After each session, pick the activity, add a note if you like, and type in the active calories from your watch. It all adds to your burn, so a big session earns you more food." },
+  { icon: "💧", color: "#38BDF8", title: "Protein and water", body: "Set a daily protein goal to protect muscle while you cut, and tap a glass each time you drink. Both turn green when you hit them." },
+  { icon: "📅", color: T.amber, title: "Think in weeks, not days", body: "One heavy day won't undo a good week. The Board shows your Mon to Sun total, your streak counts winning weeks, holiday days assume a sensible surplus so you don't have to log, and you can fix or backfill any day from History." },
+  { icon: "🎯", color: T.good, title: "Calibrate with your weight", body: "Weigh in a few mornings a week. Over time the app compares your real weight loss with what your logs predicted and tells you your true daily burn. You can add a past weigh-in from History so your starting weight is right." },
+  { icon: "🏆", color: T.amber, title: "Compete and share", body: "Join the optional leaderboard to compete with mates on consistency and training, never on eating less. The Share button on the Board turns your progress into an image you can post." },
 ];
 
 const COACH = [
-  { tab: "today", text: "Today is home — log food, training and weight, and watch your live balance." },
-  { tab: "fuel", text: "Fuel plans your before/during/after nutrition for any run or ride." },
-  { tab: "board", text: "The Board is your dashboard — turn the phone landscape for the full spread of stats and your goal projection." },
-  { tab: "history", text: "History holds your calendar, trends and weight calibration." },
-  { tab: "setup", text: "Setup is where you set your baseline, target, goal weight and presets — and replay this tour." },
+  { tab: "today", text: "Today is home. Log food, training, water and your weight, and watch your live balance and what you've got left to eat." },
+  { tab: "fuel", text: "Fuel plans what to eat before, during and after a run or ride, so dieting doesn't wreck your training." },
+  { tab: "board", text: "The Board has your charts, weekly total, streak and goal projection. Switch to the Leaderboard at the top, or tap Share to make a progress card." },
+  { tab: "history", text: "History holds your calendar and weight calibration. Tap any day to edit it, add a missed weigh-in or mark it as a holiday day." },
+  { tab: "setup", text: "Setup is where you set your baseline, targets, goals and presets, manage the leaderboard and your privacy, and replay this tour any time." },
 ];
 
 // dock geometry mirrors the real nav so coach marks line up
