@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { supabase } from "./supabaseClient";
 import Onboarding from "./Onboarding";
+import Consent, { PrivacyNotice, CONSENT_VERSION, SHARED_STATS, validDisplayName } from "./Consent";
 
 // ---------- helpers ----------
 const todayKey = () => {
@@ -193,6 +194,14 @@ export default function DeficitTracker({ session }) {  const userId = session.us
   const [tab, setTab] = useState("today");
   const [settings, setSettings] = useState({ maintenance: 2500, target: 500, goalWeight: null, proteinGoal: 0, waterGoal: 8, presets: DEFAULT_PRESETS, onboarded: false });
   const [showTour, setShowTour] = useState(false);
+  const [profile, setProfile] = useState(null);        // consent + leaderboard record
+  const [hadSettings, setHadSettings] = useState(false); // existing user (re-consent wording)
+  const [boardView, setBoardView] = useState("me");     // me | leaderboard
+  const [showPrivacy, setShowPrivacy] = useState(false);
+  const [nameDraft, setNameDraft] = useState("");
+  const [lbMsg, setLbMsg] = useState("");
+  const [deleteText, setDeleteText] = useState("");
+  const [deleting, setDeleting] = useState(false);
   const [day, setDay] = useState({ food: [], exercise: [] });
   const [water, setWater] = useState(0);
   const [holiday, setHoliday] = useState(false);
@@ -216,12 +225,15 @@ export default function DeficitTracker({ session }) {  const userId = session.us
     const t = setTimeout(() => setSplash(false), 2600);
     (async () => {
       try {
-        const [stRes, daysRes, wRes, todayRes] = await Promise.all([
+        const [stRes, daysRes, wRes, todayRes, profRes] = await Promise.all([
           supabase.from("settings").select("*").eq("user_id", userId).maybeSingle(),
           supabase.from("days").select("date,intake,protein,training,maintenance,water,holiday").eq("user_id", userId),
           supabase.from("weights").select("date,kg").eq("user_id", userId),
           supabase.from("days").select("entries,water,holiday").eq("user_id", userId).eq("date", date).maybeSingle(),
+          supabase.from("profiles").select("*").eq("user_id", userId).maybeSingle(),
         ]);
+        if (profRes.data) { setProfile(profRes.data); setNameDraft(profRes.data.display_name || ""); }
+        if (stRes.data) setHadSettings(true);
         const seenLocally = (() => { try { return window.localStorage.getItem(`deficit.onboarded.${userId}`) === "1"; } catch { return false; } })();
         if (stRes.data) {
           const s = {
@@ -258,6 +270,19 @@ export default function DeficitTracker({ session }) {  const userId = session.us
     })();
     return () => clearTimeout(t);
   }, [userId]);
+
+  // keep my leaderboard row fresh while I'm opted in (only summary numbers are sent)
+  useEffect(() => {
+    if (!ready || !profile || !profile.leaderboard_opt_in || (profile.consent_version || 0) < CONSENT_VERSION || !profile.display_name) return;
+    const t = setTimeout(() => {
+      supabase.from("leaderboard_stats").upsert({
+        user_id: userId, display_name: profile.display_name,
+        ...computeLeaderboardStats(summaries, weights, settings),
+        updated_at: new Date().toISOString(),
+      }).then(() => {});
+    }, 1500);
+    return () => clearTimeout(t);
+  }, [ready, profile, summaries, weights, settings, userId]);
 
   // ---------- persistence ----------
   const persistDay = async (newDay, newWater = water, newHoliday = holiday) => {
@@ -324,6 +349,59 @@ export default function DeficitTracker({ session }) {  const userId = session.us
     a.download = `deficit-export-${todayKey()}.csv`;
     a.click();
     URL.revokeObjectURL(a.href);
+  };
+
+  // ---------- consent & leaderboard ----------
+  const nameTakenMsg = (error) => error && error.code === "23505" ? "That display name is already taken. Try another." : null;
+
+  const acceptConsent = async ({ optIn, displayName }) => {
+    const firstTime = !profile || !profile.consent_version;
+    const row = {
+      user_id: userId,
+      display_name: displayName || (profile && profile.display_name) || null,
+      leaderboard_opt_in: !!optIn,
+      leaderboard_choice_at: new Date().toISOString(),
+      consent_version: CONSENT_VERSION,
+      consent_at: new Date().toISOString(),
+      health_consent: true,
+      age_confirmed: true,
+      updated_at: new Date().toISOString(),
+    };
+    const { data, error } = await supabase.from("profiles").upsert(row).select().maybeSingle();
+    if (error) return nameTakenMsg(error) || "Couldn't save your choices. Check your connection and try again.";
+    setProfile(data || row); setNameDraft(row.display_name || "");
+    if (firstTime) { setTab("today"); setShowTour(true); }
+    return null;
+  };
+
+  const updateLeaderboard = async (optIn) => {
+    setLbMsg("");
+    const n = nameDraft.trim();
+    if (optIn) { const e = validDisplayName(n); if (e) { setLbMsg(e); return; } }
+    const patch = { leaderboard_opt_in: optIn, leaderboard_choice_at: new Date().toISOString(), updated_at: new Date().toISOString(), ...(optIn ? { display_name: n } : {}) };
+    const { data, error } = await supabase.from("profiles").update(patch).eq("user_id", userId).select().maybeSingle();
+    if (error) { setLbMsg(nameTakenMsg(error) || "Couldn't save that. Try again."); return; }
+    if (!optIn) await supabase.from("leaderboard_stats").delete().eq("user_id", userId); // belt and braces; the database trigger does this too
+    setProfile(data || { ...profile, ...patch });
+    setLbMsg(optIn ? "You're on the leaderboard." : "You've left the leaderboard and your entry has been removed.");
+  };
+
+  const deleteAccount = async () => {
+    if (deleteText.trim().toUpperCase() !== "DELETE") return;
+    setDeleting(true);
+    const { error: rpcErr } = await supabase.rpc("delete_my_account");
+    if (rpcErr) {
+      // fallback: erase every row we hold, even if the login itself couldn't be removed
+      await Promise.all([
+        supabase.from("leaderboard_stats").delete().eq("user_id", userId),
+        supabase.from("weights").delete().eq("user_id", userId),
+        supabase.from("days").delete().eq("user_id", userId),
+        supabase.from("settings").delete().eq("user_id", userId),
+        supabase.from("profiles").delete().eq("user_id", userId),
+      ]);
+    }
+    try { Object.keys(window.localStorage).filter(k => k.includes(userId)).forEach(k => window.localStorage.removeItem(k)); } catch {}
+    await supabase.auth.signOut();
   };
 
   const finishTour = () => {
@@ -425,6 +503,12 @@ export default function DeficitTracker({ session }) {  const userId = session.us
 
   if (!ready || splash) return <Splash />;
 
+  // consent gate: new AND existing users must agree before using the app
+  if (!profile || (profile.consent_version || 0) < CONSENT_VERSION || !profile.health_consent) {
+    return <Consent isExisting={hadSettings} initialName={(profile && profile.display_name) || ""}
+      onAccept={acceptConsent} onDecline={() => supabase.auth.signOut()} />;
+  }
+
   const rowDivider = { borderTop: "1px solid rgba(255,255,255,0.07)" };  const sectionLabel = (color, text) => (
     <div style={{ ...labelStyle, color, marginBottom: 12, display: "flex", alignItems: "center", gap: 7 }}>
       <span style={{ width: 6, height: 6, borderRadius: 3, background: color, boxShadow: `0 0 6px ${color}` }} />{text}
@@ -435,6 +519,17 @@ export default function DeficitTracker({ session }) {  const userId = session.us
     <div style={{ minHeight: "100vh", background: BG, fontFamily: "'Inter',ui-sans-serif,system-ui,sans-serif", color: T.text }}>
       <style>{GLOBAL_CSS}</style>
       {showTour && <Onboarding onFinish={finishTour} isDesktop={isDesktop} />}
+      {showPrivacy && (
+        <div onClick={() => setShowPrivacy(false)} style={{ position: "fixed", inset: 0, zIndex: 70, background: "rgba(5,8,14,0.8)", backdropFilter: "blur(6px)", WebkitBackdropFilter: "blur(6px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+          <div onClick={e => e.stopPropagation()} style={{ background: "#0E1626", border: `1px solid ${T.glassBorder}`, borderRadius: 22, padding: 22, width: "100%", maxWidth: 560, maxHeight: "88vh", overflowY: "auto", boxSizing: "border-box" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div style={{ ...numFont, fontSize: 26, fontWeight: 700 }}>Privacy notice</div>
+              <button onClick={() => setShowPrivacy(false)} style={{ background: "none", border: "none", color: T.sub, fontSize: 18, cursor: "pointer" }}>✕</button>
+            </div>
+            <PrivacyNotice />
+          </div>
+        </div>
+      )}
 
       {/* desktop sidebar */}
       {isDesktop && (
@@ -652,7 +747,21 @@ export default function DeficitTracker({ session }) {  const userId = session.us
 
         {tab === "history" && <History summaries={summaries} maintenance={settings.maintenance} weights={weights} onApplyBaseline={applyBaseline} fetchDay={fetchDay} persistDayFor={persistDayFor} presets={settings.presets || []} logWeightFor={logWeightFor} />}
 
-        {tab === "board" && <Board summaries={summaries} weights={weights} settings={settings} net={net} protein={protein} exercise={exercise} fetchDay={fetchDay} />}
+        {tab === "board" && (
+          <>
+            <div style={{ display: "inline-flex", padding: 4, borderRadius: 999, background: "rgba(255,255,255,0.05)", border: `1px solid ${T.glassBorder}`, marginBottom: 14 }}>
+              {[["me", "My stats"], ["leaderboard", "🏆 Leaderboard"]].map(([k, lbl]) => (
+                <button key={k} onClick={() => setBoardView(k)}
+                  style={{ padding: "8px 16px", borderRadius: 999, border: "none", cursor: "pointer", fontSize: 13, fontWeight: 700, background: boardView === k ? GRAD_BURN : "transparent", color: boardView === k ? "#fff" : T.sub }}>
+                  {lbl}
+                </button>
+              ))}
+            </div>
+            {boardView === "me"
+              ? <Board summaries={summaries} weights={weights} settings={settings} net={net} protein={protein} exercise={exercise} fetchDay={fetchDay} />
+              : <Leaderboard userId={userId} profile={profile} onManage={() => setTab("setup")} />}
+          </>
+        )}
 
         {tab === "fuel" && <FuelPlan latestW={latestW} target={settings.target} />}
 
@@ -695,6 +804,36 @@ export default function DeficitTracker({ session }) {  const userId = session.us
             <button onClick={saveSettings} style={{ ...btn(GRAD_FUEL), width: "100%", marginTop: 18, boxShadow: "0 6px 20px rgba(46,124,246,0.35)" }}>Save settings</button>
             <button onClick={exportCSV} style={{ ...btn("rgba(255,255,255,0.08)", T.text), width: "100%", marginTop: 10, border: `1px solid ${T.glassBorder}` }}>⬇︎ Export all data (CSV)</button>
             <button onClick={() => { setTab("today"); setShowTour(true); }} style={{ ...btn("rgba(255,255,255,0.08)", T.text), width: "100%", marginTop: 10, border: `1px solid ${T.glassBorder}` }}>↻ Replay the tour</button>
+
+            <div style={{ marginTop: 28 }}>{sectionLabel(T.amber, "Privacy & leaderboard")}</div>
+            <p style={{ fontSize: 13.5, color: T.sub, lineHeight: 1.6, marginTop: -4 }}>
+              Consent given {profile.consent_at ? new Date(profile.consent_at).toLocaleDateString([], { day: "numeric", month: "long", year: "numeric" }) : ""}. {profile.leaderboard_opt_in
+                ? <>You're on the leaderboard as <strong style={{ color: T.text }}>{profile.display_name}</strong>. Members see your name and summary stats only, never your weight or food.</>
+                : <>You're not on the leaderboard. Your data is visible to you alone.</>}
+            </p>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input style={{ ...inputStyle, flex: 1 }} placeholder="Display name" maxLength={24} value={nameDraft} onChange={e => setNameDraft(e.target.value)} />
+              <button onClick={() => updateLeaderboard(true)} style={{ ...btn(GRAD_BURN), whiteSpace: "nowrap" }}>{profile.leaderboard_opt_in ? "Rename" : "Join"}</button>
+            </div>
+            {profile.leaderboard_opt_in && (
+              <button onClick={() => updateLeaderboard(false)} style={{ ...btn("rgba(255,255,255,0.06)", T.text), width: "100%", marginTop: 8, border: `1px solid ${T.glassBorder}` }}>Leave the leaderboard</button>
+            )}
+            {lbMsg && <div style={{ fontSize: 13, color: lbMsg.startsWith("You") ? T.good : T.bad, marginTop: 8 }}>{lbMsg}</div>}
+            <button onClick={() => setShowPrivacy(true)} style={{ ...btn("rgba(255,255,255,0.08)", T.text), width: "100%", marginTop: 10, border: `1px solid ${T.glassBorder}` }}>🔒 Read the privacy notice</button>
+
+            <div style={{ marginTop: 22, padding: 16, borderRadius: 16, background: "rgba(255,92,92,0.06)", border: "1px solid rgba(255,92,92,0.25)" }}>
+              <div style={{ ...labelStyle, color: "#FF9B9B", marginBottom: 8 }}>Delete my account</div>
+              <p style={{ fontSize: 13.5, color: T.sub, lineHeight: 1.6, margin: "0 0 10px" }}>
+                Permanently erases your account and everything in it: logs, weigh-ins, settings, consent record and leaderboard entry. This also withdraws your consent. It can't be undone, so export your data first if you want a copy. Type <strong style={{ color: T.text }}>DELETE</strong> to confirm.
+              </p>
+              <div style={{ display: "flex", gap: 8 }}>
+                <input style={{ ...inputStyle, flex: 1 }} placeholder="Type DELETE" value={deleteText} onChange={e => setDeleteText(e.target.value)} />
+                <button onClick={deleteAccount} disabled={deleteText.trim().toUpperCase() !== "DELETE" || deleting}
+                  style={{ ...btn(deleteText.trim().toUpperCase() === "DELETE" ? "#D93A3A" : "rgba(255,255,255,0.06)", deleteText.trim().toUpperCase() === "DELETE" ? "#fff" : T.faint), whiteSpace: "nowrap" }}>
+                  {deleting ? "Deleting…" : "Delete"}
+                </button>
+              </div>
+            </div>
 
             <div style={{ marginTop: 22, paddingTop: 16, borderTop: "1px solid rgba(255,255,255,0.08)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <span style={{ fontSize: 13, color: T.sub }}>{session.user.email}</span>
@@ -856,6 +995,172 @@ const METRICS = {
 };
 const RANGES = [[7, "7d"], [14, "14d"], [30, "30d"], [90, "90d"], [183, "6mo"], [365, "12mo"]];
 const rangeLabel = (n) => n === 183 ? "6 months" : n === 365 ? "12 months" : `${n} days`;
+
+
+// ---------- leaderboard: compute ONLY the shareable summary numbers ----------
+// Deliberately excludes anything about eating, weight values or calories consumed.
+const dKey = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+function computeLeaderboardStats(summaries, weights, settings) {
+  const today = new Date(); today.setHours(12, 0, 0, 0);
+  const back = (n) => { const d = new Date(today); d.setDate(d.getDate() - n); return d; };
+  const netOf = (s) => (s.maint || settings.maintenance) + s.ex - s.in;
+
+  // weekly streak (same rule as the Board): consecutive Mon–Sun weeks hitting target
+  const monOf = (d) => { const x = new Date(d); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return x; };
+  let streak = 0;
+  for (let w = 0; w < 104; w++) {
+    const mon = monOf(today); mon.setDate(mon.getDate() - w * 7);
+    let wNet = 0, wDays = 0, inProgress = false;
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(mon); d.setDate(mon.getDate() + i);
+      if (d > today) { inProgress = true; break; }
+      const s = summaries[dKey(d)];
+      if (s) { wNet += netOf(s); wDays++; }
+    }
+    if (wDays === 0) { if (w === 0) continue; else break; }
+    if (wNet >= settings.target * wDays) streak++;
+    else if (w === 0 && inProgress) continue;
+    else break;
+  }
+
+  let logged = 0, proHit = 0, proDays = 0, waterHit = 0, waterDays = 0, kcal7 = 0, kcal30 = 0;
+  for (let i = 0; i < 30; i++) {
+    const s = summaries[dKey(back(i))];
+    if (!s) continue;
+    kcal30 += s.ex || 0; if (i < 7) kcal7 += s.ex || 0;
+    waterDays++; if ((s.water || 0) >= (settings.waterGoal || 8)) waterHit++;
+    if (!s.hol) {
+      logged++;
+      if (settings.proteinGoal > 0) { proDays++; if ((s.pro || 0) >= settings.proteinGoal) proHit++; }
+    }
+  }
+
+  // training streak: consecutive days with a workout (today may still be empty)
+  let trainStreak = 0;
+  for (let i = 0; i < 400; i++) {
+    const s = summaries[dKey(back(i))];
+    if (s && s.ex > 0) trainStreak++;
+    else if (i === 0) continue;
+    else break;
+  }
+
+  const wk = Object.keys(weights).sort();
+  const startW = wk.length ? weights[wk[0]] : null, latestW = wk.length ? weights[wk[wk.length - 1]] : null;
+  const goal = settings.goalWeight;
+  const goalPct = goal && startW != null && latestW != null && startW > goal
+    ? Math.round(Math.min(100, Math.max(0, ((startW - latestW) / (startW - goal)) * 100))) : null;
+
+  return {
+    streak_weeks: streak,
+    days_logged_30: logged,
+    goal_pct: goalPct,
+    protein_rate: proDays ? Math.round((proHit / proDays) * 100) : null,
+    water_rate: waterDays ? Math.round((waterHit / waterDays) * 100) : null,
+    train_streak: trainStreak,
+    train_kcal_7d: Math.round(kcal7),
+    train_kcal_30d: Math.round(kcal30),
+  };
+}
+
+const LB_METRICS = [
+  { key: "streak_weeks", label: "Streak", icon: "🔥", fmt: v => `${v} wk${v === 1 ? "" : "s"}`, blurb: "Weeks in a row on target" },
+  { key: "days_logged_30", label: "Logging", icon: "📅", fmt: v => `${v}/30`, blurb: "Days logged in the last 30" },
+  { key: "goal_pct", label: "Goal", icon: "🎯", fmt: v => `${v}%`, blurb: "Progress towards their own goal" },
+  { key: "train_streak", label: "Training run", icon: "🏃", fmt: v => `${v} day${v === 1 ? "" : "s"}`, blurb: "Days in a row with a workout" },
+  { key: "train_kcal_7d", label: "Burn 7d", icon: "⚡", fmt: v => `${v.toLocaleString()} kcal`, blurb: "Calories burned in training, last 7 days" },
+  { key: "train_kcal_30d", label: "Burn 30d", icon: "⚡", fmt: v => `${v.toLocaleString()} kcal`, blurb: "Calories burned in training, last 30 days" },
+  { key: "protein_rate", label: "Protein", icon: "💪", fmt: v => `${v}%`, blurb: "Days hitting their protein goal" },
+  { key: "water_rate", label: "Water", icon: "💧", fmt: v => `${v}%`, blurb: "Days hitting their water goal" },
+];
+
+const ago = (iso) => {
+  const m = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+  if (m < 2) return "just now";
+  if (m < 60) return `${m}m ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.round(h / 24)}d ago`;
+};
+
+function Leaderboard({ userId, profile, onManage }) {
+  const [rows, setRows] = useState(null);
+  const [metric, setMetric] = useState("streak_weeks");
+  const [err, setErr] = useState("");
+  const opted = profile && profile.leaderboard_opt_in;
+
+  useEffect(() => {
+    if (!opted) return;
+    let alive = true;
+    (async () => {
+      const { data, error } = await supabase.from("leaderboard_stats").select("*");
+      if (!alive) return;
+      if (error) setErr("Couldn't load the leaderboard right now.");
+      else setRows(data || []);
+    })();
+    return () => { alive = false; };
+  }, [opted]);
+
+  if (!opted) {
+    return (
+      <div className="card-in" style={{ ...cardStyle, textAlign: "center", padding: 28 }}>
+        <div style={{ fontSize: 44, marginBottom: 8 }}>🏆</div>
+        <div style={{ ...numFont, fontSize: 28, fontWeight: 700, marginBottom: 8 }}>Healthy competition</div>
+        <p style={{ fontSize: 14, color: T.sub, lineHeight: 1.6, maxWidth: 420, margin: "0 auto 16px" }}>
+          The leaderboard ranks mates on consistency and training, never on how little they eat. You can only see it once you've joined, and members only ever see your display name and these stats:
+        </p>
+        <ul style={{ textAlign: "left", maxWidth: 380, margin: "0 auto 18px", paddingLeft: 18 }}>{SHARED_STATS.map(s => <li key={s} style={{ fontSize: 13, color: "#B9C2D0", lineHeight: 1.6 }}>{s}</li>)}</ul>
+        <button onClick={onManage} style={{ ...btn(GRAD_BURN), boxShadow: "0 6px 18px rgba(232,67,31,0.3)" }}>Join in Setup</button>
+      </div>
+    );
+  }
+
+  const m = LB_METRICS.find(x => x.key === metric);
+  const ranked = (rows || []).filter(r => r[metric] != null).sort((a, b) => b[metric] - a[metric]);
+  const unranked = (rows || []).filter(r => r[metric] == null);
+  const medal = (i) => ["🥇", "🥈", "🥉"][i] || null;
+
+  return (
+    <>
+      <div className="card-in" style={{ ...cardStyle }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12 }}>
+          {LB_METRICS.map(x => (
+            <button key={x.key} onClick={() => setMetric(x.key)}
+              style={{ padding: "7px 12px", borderRadius: 999, border: metric === x.key ? "none" : `1px solid ${T.glassBorder}`, background: metric === x.key ? GRAD_BURN : "rgba(255,255,255,0.05)", color: metric === x.key ? "#fff" : T.sub, fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+              {x.icon} {x.label}
+            </button>
+          ))}
+        </div>
+        <div style={{ fontSize: 13, color: T.sub, marginBottom: 12 }}>{m.blurb}</div>
+
+        {err && <p style={{ fontSize: 14, color: T.bad }}>{err}</p>}
+        {rows === null && !err && <p style={{ fontSize: 14, color: T.sub }}>Loading…</p>}
+        {rows && rows.length <= 1 && <p style={{ fontSize: 14, color: T.sub, lineHeight: 1.6 }}>You're the first one here. Send a mate the link and the table fills up as they join.</p>}
+
+        {ranked.map((r, i) => {
+          const me = r.user_id === userId;
+          return (
+            <div key={r.user_id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 12px", marginBottom: 6, borderRadius: 14, background: me ? "rgba(255,107,53,0.10)" : "rgba(255,255,255,0.03)", border: `1px solid ${me ? "rgba(255,107,53,0.4)" : "rgba(255,255,255,0.06)"}` }}>
+              <div style={{ width: 30, textAlign: "center", fontSize: medal(i) ? 22 : 15, fontWeight: 700, color: T.sub }}>{medal(i) || i + 1}</div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 15, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.display_name}{me && <span style={{ color: T.burn, fontSize: 12, marginLeft: 6 }}>you</span>}</div>
+                <div style={{ fontSize: 11, color: T.faint }}>updated {ago(r.updated_at)}</div>
+              </div>
+              <div style={{ ...numFont, fontSize: 22, fontWeight: 700, color: i === 0 ? T.amber : T.text }}>{m.fmt(r[metric])}</div>
+            </div>
+          );
+        })}
+        {unranked.length > 0 && (
+          <div style={{ fontSize: 12, color: T.faint, marginTop: 8, lineHeight: 1.5 }}>
+            Not ranked here: {unranked.map(r => r.display_name).join(", ")} (no {metric === "goal_pct" ? "goal weight" : metric === "protein_rate" ? "protein goal" : "data"} set yet).
+          </div>
+        )}
+      </div>
+      <div style={{ fontSize: 12, color: T.faint, lineHeight: 1.6, padding: "0 4px 8px" }}>
+        Everyone's stats refresh each time they open Deficit. No weights, food or calories eaten are ever shared. Manage your entry in Setup → Privacy & leaderboard.
+      </div>
+    </>
+  );
+}
 
 function ShareSheet({ onClose, data }) {
   const { lostKg, startW, latestW, equiv, streak, wk, avg7, avgLabel } = data;
