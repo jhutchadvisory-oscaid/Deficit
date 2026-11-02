@@ -1010,14 +1010,15 @@ function computeLeaderboardStats(summaries, weights, settings) {
   let streak = 0;
   for (let w = 0; w < 104; w++) {
     const mon = monOf(today); mon.setDate(mon.getDate() - w * 7);
-    let wNet = 0, wDays = 0, inProgress = false;
+    let wNet = 0, wDays = 0, wHols = 0, inProgress = false;
     for (let i = 0; i < 7; i++) {
       const d = new Date(mon); d.setDate(mon.getDate() + i);
       if (d > today) { inProgress = true; break; }
       const s = summaries[dKey(d)];
-      if (s) { wNet += netOf(s); wDays++; }
+      if (s && s.hol) wHols++;                       // holiday days neither help nor hurt
+      else if (s) { wNet += netOf(s); wDays++; }
     }
-    if (wDays === 0) { if (w === 0) continue; else break; }
+    if (wDays === 0) { if (w === 0 || wHols > 0) continue; else break; } // all-holiday week: skip, don't break
     if (wNet >= settings.target * wDays) streak++;
     else if (w === 0 && inProgress) continue;
     else break;
@@ -1028,9 +1029,9 @@ function computeLeaderboardStats(summaries, weights, settings) {
     const s = summaries[dKey(back(i))];
     if (!s) continue;
     kcal30 += s.ex || 0; if (i < 7) kcal7 += s.ex || 0;
-    waterDays++; if ((s.water || 0) >= (settings.waterGoal || 8)) waterHit++;
-    if (!s.hol) {
-      logged++;
+    logged++;                                        // a holiday day you marked still counts as logged
+    if (!s.hol) {                                    // goals are only judged on normal days
+      waterDays++; if ((s.water || 0) >= (settings.waterGoal || 8)) waterHit++;
       if (settings.proteinGoal > 0) { proDays++; if ((s.pro || 0) >= settings.proteinGoal) proHit++; }
     }
   }
@@ -1040,7 +1041,7 @@ function computeLeaderboardStats(summaries, weights, settings) {
   for (let i = 0; i < 400; i++) {
     const s = summaries[dKey(back(i))];
     if (s && s.ex > 0) trainStreak++;
-    else if (i === 0) continue;
+    else if (i === 0 || (s && s.hol)) continue;      // today may be empty; holidays don't snap it
     else break;
   }
 
@@ -1063,15 +1064,26 @@ function computeLeaderboardStats(summaries, weights, settings) {
 }
 
 const LB_METRICS = [
-  { key: "streak_weeks", label: "Streak", icon: "🔥", fmt: v => `${v} wk${v === 1 ? "" : "s"}`, blurb: "Weeks in a row on target" },
-  { key: "days_logged_30", label: "Logging", icon: "📅", fmt: v => `${v}/30`, blurb: "Days logged in the last 30" },
-  { key: "goal_pct", label: "Goal", icon: "🎯", fmt: v => `${v}%`, blurb: "Progress towards their own goal" },
-  { key: "train_streak", label: "Training run", icon: "🏃", fmt: v => `${v} day${v === 1 ? "" : "s"}`, blurb: "Days in a row with a workout" },
-  { key: "train_kcal_7d", label: "Burn 7d", icon: "⚡", fmt: v => `${v.toLocaleString()} kcal`, blurb: "Calories burned in training, last 7 days" },
-  { key: "train_kcal_30d", label: "Burn 30d", icon: "⚡", fmt: v => `${v.toLocaleString()} kcal`, blurb: "Calories burned in training, last 30 days" },
-  { key: "protein_rate", label: "Protein", icon: "💪", fmt: v => `${v}%`, blurb: "Days hitting their protein goal" },
-  { key: "water_rate", label: "Water", icon: "💧", fmt: v => `${v}%`, blurb: "Days hitting their water goal" },
+  { key: "overall", label: "👑 Overall", title: "👑 Champion", unit: "pts", fmt: v => `${v} pts`, blurb: "Every category combined into one score out of 100" },
+  { key: "streak_weeks", label: "🔥 Streak", title: "🔥 On Fire", unit: "weeks", fmt: v => `${v} wk${v === 1 ? "" : "s"}`, blurb: "Weeks in a row on target" },
+  { key: "days_logged_30", label: "📅 Logging", title: "📅 Never Misses", unit: "days", fmt: v => `${v}/30`, blurb: "Days logged in the last 30" },
+  { key: "goal_pct", label: "🎯 Goal", title: "🎯 Closing In", unit: "%", fmt: v => `${v}%`, blurb: "Progress towards their own goal" },
+  { key: "train_streak", label: "🏃 Training run", title: "🏃 Relentless", unit: "days", fmt: v => `${v} day${v === 1 ? "" : "s"}`, blurb: "Days in a row with a workout" },
+  { key: "train_kcal_7d", label: "⚡ Burn 7d", title: "⚡ The Engine", unit: "kcal", fmt: v => v.toLocaleString(), blurb: "Calories burned in training, last 7 days" },
+  { key: "train_kcal_30d", label: "🌋 Burn 30d", title: "🌋 Furnace", unit: "kcal", fmt: v => v.toLocaleString(), blurb: "Calories burned in training, last 30 days" },
+  { key: "protein_rate", label: "💪 Protein", title: "💪 Protein Pro", unit: "%", fmt: v => `${v}%`, blurb: "Days hitting their protein goal" },
+  { key: "water_rate", label: "💧 Water", title: "💧 Hydro Hero", unit: "%", fmt: v => `${v}%`, blurb: "Days hitting their water goal" },
 ];
+const LB_CATS = LB_METRICS.filter(m => m.key !== "overall").map(m => m.key);
+
+// Overall: each category as a % of that category's leader, averaged. Missing data counts as 0,
+// so nobody can climb by leaving a goal unset.
+function withOverall(rows) {
+  const max = {};
+  LB_CATS.forEach(k => { max[k] = Math.max(0, ...rows.map(r => r[k] || 0)); });
+  const live = LB_CATS.filter(k => max[k] > 0);
+  return rows.map(r => ({ ...r, overall: live.length ? Math.round(live.reduce((a, k) => a + (r[k] || 0) / max[k], 0) / live.length * 100) : 0 }));
+}
 
 const ago = (iso) => {
   const m = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
@@ -1082,22 +1094,58 @@ const ago = (iso) => {
   return `${Math.round(h / 24)}d ago`;
 };
 
+const AV_GRADS = ["#E8431F,#FF7B42", "#2E7CF6,#4DA3FF", "#1FA866,#3DDC84", "#7B5CFF,#B7A6FF", "#C2185B,#F06292", "#0E9AA7,#4DD7C8", "#B8860B,#FFD54A"];
+const gradFor = (id) => AV_GRADS[[...String(id)].reduce((a, c) => a + c.charCodeAt(0), 0) % AV_GRADS.length];
+const initials = (n) => (n || "?").trim().split(/\s+/).map(w => w[0]).join("").slice(0, 2).toUpperCase();
+const withUnit = (v, u) => u === "%" ? `${v.toLocaleString()}%` : `${v.toLocaleString()} ${u}`;
+const ordinal = (n) => n + (["th", "st", "nd", "rd"][(n % 100 - 20) % 10] || ["th", "st", "nd", "rd"][n % 100] || "th");
+
+function Avatar({ r, size = 58, ring, me }) {
+  return (
+    <div style={{ position: "relative", width: size, height: size, borderRadius: "50%", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: size * 0.33, color: "#fff", background: `linear-gradient(135deg,${gradFor(r.user_id)})`, border: `${size > 50 ? 3 : 2}px solid ${ring || "rgba(255,255,255,0.15)"}`, boxShadow: ring === "#FFD54A" ? "0 0 28px rgba(255,213,74,0.55)" : "none" }}>
+      {initials(r.display_name)}
+      {me && <span style={{ position: "absolute", bottom: -7, background: T.burn, color: "#fff", fontSize: 9, fontWeight: 800, padding: "2px 6px", borderRadius: 6, letterSpacing: "0.05em" }}>YOU</span>}
+    </div>
+  );
+}
+
+const LB_CSS = `
+@keyframes lbRise{from{transform:scaleY(0)}to{transform:scaleY(1)}}
+@keyframes lbPop{from{opacity:0;transform:translateY(20px) scale(.7)}to{opacity:1;transform:none}}
+@keyframes lbBob{0%,100%{transform:translateY(0) rotate(-6deg)}50%{transform:translateY(-4px) rotate(6deg)}}
+@keyframes lbFall{to{transform:translateY(330px) rotate(540deg);opacity:0}}
+.lbchips{display:flex;gap:6px;overflow-x:auto;padding-bottom:4px;scrollbar-width:none}
+.lbchips::-webkit-scrollbar{display:none}`;
+
+function Confetti({ seed }) {
+  const cols = ["#FFD54A", "#FF6B35", "#3DDC84", "#4DA3FF", "#B7A6FF"];
+  return (
+    <div key={seed} style={{ position: "absolute", inset: 0, pointerEvents: "none", overflow: "hidden", borderRadius: 22 }}>
+      {Array.from({ length: 34 }, (_, i) => (
+        <i key={i} style={{ position: "absolute", top: -12, left: `${28 + ((i * 37) % 44)}%`, width: 7, height: 11, borderRadius: 2, background: cols[i % cols.length], animation: `lbFall 1.6s ease-in ${(i % 9) * 0.05}s forwards`, transform: `translateX(${((i * 53) % 200) - 100}px)` }} />
+      ))}
+    </div>
+  );
+}
+
 function Leaderboard({ userId, profile, onManage }) {
   const [rows, setRows] = useState(null);
-  const [metric, setMetric] = useState("streak_weeks");
+  const [metric, setMetric] = useState("overall");
   const [err, setErr] = useState("");
+  const [burst, setBurst] = useState(1);
   const opted = profile && profile.leaderboard_opt_in;
 
   useEffect(() => {
     if (!opted) return;
     let alive = true;
-    (async () => {
+    // short delay so my own freshly-computed stats have been pushed before we read
+    const t = setTimeout(async () => {
       const { data, error } = await supabase.from("leaderboard_stats").select("*");
       if (!alive) return;
       if (error) setErr("Couldn't load the leaderboard right now.");
-      else setRows(data || []);
-    })();
-    return () => { alive = false; };
+      else setRows(withOverall(data || []));
+    }, 1800);
+    return () => { alive = false; clearTimeout(t); };
   }, [opted]);
 
   if (!opted) {
@@ -1113,50 +1161,133 @@ function Leaderboard({ userId, profile, onManage }) {
       </div>
     );
   }
+  if (err) return <div style={cardStyle}><p style={{ fontSize: 14, color: T.bad, margin: 0 }}>{err}</p></div>;
+  if (rows === null) return <div style={cardStyle}><p style={{ fontSize: 14, color: T.sub, margin: 0 }}>Loading the leaderboard…</p></div>;
 
   const m = LB_METRICS.find(x => x.key === metric);
-  const ranked = (rows || []).filter(r => r[metric] != null).sort((a, b) => b[metric] - a[metric]);
-  const unranked = (rows || []).filter(r => r[metric] == null);
-  const medal = (i) => ["🥇", "🥈", "🥉"][i] || null;
+  const pick = (k) => { setMetric(k); setBurst(b => b + 1); };
+  const ranked = rows.filter(r => r[metric] != null).sort((a, b) => b[metric] - a[metric]);
+  const unranked = rows.filter(r => r[metric] == null);
+  const top = ranked.slice(0, 3);
+  const rest = ranked.slice(3);
+  const max = ranked.length ? Math.max(1, ranked[0][metric]) : 1;
+
+  const spot = (r, place) => {
+    const conf = {
+      1: { h: 130, grad: "linear-gradient(180deg,#E8B92E,#8A6510)", ring: "#FFD54A", size: 76, delay: ".15s" },
+      2: { h: 95, grad: "linear-gradient(180deg,#9BA7B8,#4A5566)", ring: "#C9D3E0", size: 58, delay: "0s" },
+      3: { h: 70, grad: "linear-gradient(180deg,#C07A40,#6B3E19)", ring: "#D08A4F", size: 58, delay: ".08s" },
+    }[place];
+    return (
+      <div key={place} style={{ flex: 1, maxWidth: 130, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end", height: "100%" }}>
+        {r ? (
+          <div key={`${metric}-${r.user_id}`} style={{ display: "flex", flexDirection: "column", alignItems: "center", marginBottom: 8, animation: "lbPop .5s cubic-bezier(.2,.9,.3,1.3) both", position: "relative" }}>
+            {place === 1 && <div style={{ position: "absolute", top: -28, fontSize: 26, animation: "lbBob 2s ease-in-out infinite" }}>👑</div>}
+            <Avatar r={r} size={conf.size} ring={conf.ring} me={r.user_id === userId} />
+            <div style={{ fontSize: 14, fontWeight: 700, marginTop: 9, maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.display_name}</div>
+            <div style={{ ...numFont, fontWeight: 700, fontSize: place === 1 ? 28 : 22, lineHeight: 1, marginTop: 2, color: place === 1 ? "#FFD54A" : T.text }}>{m.fmt(r[metric])}</div>
+          </div>
+        ) : (
+          <div style={{ marginBottom: 10, fontSize: 12, color: T.faint, textAlign: "center" }}>Space for<br />a mate</div>
+        )}
+        <div key={`b-${metric}`} style={{ width: "100%", height: conf.h, borderRadius: "14px 14px 6px 6px", background: r ? conf.grad : "rgba(255,255,255,0.05)", display: "flex", justifyContent: "center", paddingTop: 10, ...numFont, fontWeight: 700, fontSize: 40, color: "rgba(255,255,255,0.85)", transformOrigin: "bottom", animation: `lbRise .6s cubic-bezier(.2,.8,.2,1) ${conf.delay} both`, boxShadow: "inset 0 18px 24px -18px rgba(255,255,255,0.4)" }}>{place}</div>
+      </div>
+    );
+  };
+
+  // "your position" card
+  const myIdx = ranked.findIndex(r => r.user_id === userId);
+  let youCard = null;
+  if (myIdx === -1) {
+    youCard = <><div style={{ ...numFont, fontWeight: 700, fontSize: 30, color: T.burn, minWidth: 50, textAlign: "center" }}>–</div><div style={{ fontSize: 13.5, color: "#B9C2D0", lineHeight: 1.5 }}>You're not ranked here yet. Set a {metric === "goal_pct" ? "goal weight" : metric === "protein_rate" ? "protein goal" : "goal"} in Setup to join this one.</div></>;
+  } else if (myIdx === 0) {
+    const second = ranked[1];
+    youCard = <><div style={{ ...numFont, fontWeight: 700, fontSize: 34, color: T.burn, minWidth: 50, textAlign: "center" }}>1st</div><div style={{ fontSize: 13.5, color: "#B9C2D0", lineHeight: 1.5 }}><b style={{ color: "#fff" }}>You're top of this table.</b> {second ? <>{second.display_name} is {withUnit(ranked[0][metric] - second[metric], m.unit)} behind you. Keep it going.</> : <>Invite a mate to give you some competition.</>}</div></>;
+  } else {
+    const above = ranked[myIdx - 1];
+    const gap = above[metric] - ranked[myIdx][metric] + 1;
+    youCard = <><div style={{ ...numFont, fontWeight: 700, fontSize: 34, color: T.burn, minWidth: 50, textAlign: "center" }}>{ordinal(myIdx + 1)}</div><div style={{ fontSize: 13.5, color: "#B9C2D0", lineHeight: 1.5 }}><b style={{ color: "#fff" }}>{withUnit(gap, m.unit)}</b> more to overtake <b style={{ color: "#fff" }}>{above.display_name}</b> for {ordinal(myIdx)} place.</div></>;
+  }
 
   return (
     <>
-      <div className="card-in" style={{ ...cardStyle }}>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12 }}>
-          {LB_METRICS.map(x => (
-            <button key={x.key} onClick={() => setMetric(x.key)}
-              style={{ padding: "7px 12px", borderRadius: 999, border: metric === x.key ? "none" : `1px solid ${T.glassBorder}`, background: metric === x.key ? GRAD_BURN : "rgba(255,255,255,0.05)", color: metric === x.key ? "#fff" : T.sub, fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
-              {x.icon} {x.label}
-            </button>
-          ))}
+      <style>{LB_CSS}</style>
+      <div className="card-in" style={{ ...cardStyle, position: "relative" }}>
+        <div className="lbchips">
+          {LB_METRICS.map(x => {
+            const on = metric === x.key, gold = x.key === "overall";
+            return (
+              <button key={x.key} onClick={() => pick(x.key)}
+                style={{ flex: "0 0 auto", padding: "8px 13px", borderRadius: 999, border: on ? "none" : `1px solid ${T.glassBorder}`, cursor: "pointer", fontSize: 13, fontWeight: 700,
+                  background: on ? (gold ? "linear-gradient(135deg,#B8860B,#FFD54A)" : GRAD_BURN) : "rgba(255,255,255,0.05)",
+                  color: on ? (gold ? "#1A1200" : "#fff") : T.sub, boxShadow: on ? (gold ? "0 4px 16px rgba(255,213,74,0.4)" : "0 4px 14px rgba(232,67,31,0.35)") : "none" }}>
+                {x.label}
+              </button>
+            );
+          })}
         </div>
-        <div style={{ fontSize: 13, color: T.sub, marginBottom: 12 }}>{m.blurb}</div>
-
-        {err && <p style={{ fontSize: 14, color: T.bad }}>{err}</p>}
-        {rows === null && !err && <p style={{ fontSize: 14, color: T.sub }}>Loading…</p>}
-        {rows && rows.length <= 1 && <p style={{ fontSize: 14, color: T.sub, lineHeight: 1.6 }}>You're the first one here. Send a mate the link and the table fills up as they join.</p>}
-
-        {ranked.map((r, i) => {
-          const me = r.user_id === userId;
-          return (
-            <div key={r.user_id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 12px", marginBottom: 6, borderRadius: 14, background: me ? "rgba(255,107,53,0.10)" : "rgba(255,255,255,0.03)", border: `1px solid ${me ? "rgba(255,107,53,0.4)" : "rgba(255,255,255,0.06)"}` }}>
-              <div style={{ width: 30, textAlign: "center", fontSize: medal(i) ? 22 : 15, fontWeight: 700, color: T.sub }}>{medal(i) || i + 1}</div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 15, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.display_name}{me && <span style={{ color: T.burn, fontSize: 12, marginLeft: 6 }}>you</span>}</div>
-                <div style={{ fontSize: 11, color: T.faint }}>updated {ago(r.updated_at)}</div>
-              </div>
-              <div style={{ ...numFont, fontSize: 22, fontWeight: 700, color: i === 0 ? T.amber : T.text }}>{m.fmt(r[metric])}</div>
-            </div>
-          );
-        })}
-        {unranked.length > 0 && (
-          <div style={{ fontSize: 12, color: T.faint, marginTop: 8, lineHeight: 1.5 }}>
-            Not ranked here: {unranked.map(r => r.display_name).join(", ")} (no {metric === "goal_pct" ? "goal weight" : metric === "protein_rate" ? "protein goal" : "data"} set yet).
-          </div>
-        )}
+        <div style={{ fontSize: 13, color: T.sub, textAlign: "center", margin: "12px 0 4px" }}>{m.blurb}</div>
+        <div style={{ fontSize: 13, fontWeight: 700, color: "#FFD54A", textAlign: "center", minHeight: 18, marginBottom: 8 }}>{ranked[0] ? `${m.title}: ${ranked[0].display_name}` : ""}</div>
+        <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "center", gap: 8, height: 300, marginTop: 4 }}>
+          {spot(top[1], 2)}{spot(top[0], 1)}{spot(top[2], 3)}
+        </div>
+        {ranked.length > 0 && <Confetti seed={burst} />}
       </div>
+
+      <div className="card-in" style={{ display: "flex", alignItems: "center", gap: 12, background: "linear-gradient(135deg, rgba(255,107,53,0.14), rgba(255,107,53,0.04))", border: "1px solid rgba(255,107,53,0.4)", borderRadius: 18, padding: "14px 16px", marginBottom: 14 }}>
+        {youCard}
+      </div>
+
+      {(rest.length > 0 || unranked.length > 0 || rows.length <= 1) && (
+        <div className="card-in" style={cardStyle}>
+          <div style={{ ...labelStyle, color: T.sub, marginBottom: 10 }}>The rest of the pack</div>
+          {rows.length <= 1 && <p style={{ fontSize: 14, color: T.sub, lineHeight: 1.6, margin: 0 }}>You're the first one here. Send a mate the link and the podium fills up as they join.</p>}
+          {rest.map((r, i) => {
+            const me = r.user_id === userId;
+            return (
+              <div key={`${metric}-${r.user_id}`} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 8px", borderRadius: 12, background: me ? "rgba(255,107,53,0.08)" : "transparent", borderTop: me ? "none" : "1px solid rgba(255,255,255,0.06)", animation: `lbPop .4s ${i * 0.06}s both` }}>
+                <div style={{ width: 22, textAlign: "center", color: T.sub, fontWeight: 700, fontSize: 14 }}>{i + 4}</div>
+                <Avatar r={r} size={36} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700 }}>{r.display_name}{me && <span style={{ color: T.burn, fontSize: 11, marginLeft: 6 }}>you</span>}</div>
+                  <div style={{ height: 5, borderRadius: 3, background: "rgba(255,255,255,0.07)", marginTop: 6, overflow: "hidden" }}>
+                    <div style={{ height: "100%", width: `${(r[metric] / max) * 100}%`, borderRadius: 3, background: me ? GRAD_BURN : GRAD_FUEL, transition: "width .6s" }} />
+                  </div>
+                  <div style={{ fontSize: 10.5, color: T.faint, marginTop: 3 }}>updated {ago(r.updated_at)}</div>
+                </div>
+                <div style={{ ...numFont, fontWeight: 700, fontSize: 20 }}>{m.fmt(r[metric])}</div>
+              </div>
+            );
+          })}
+          {unranked.length > 0 && (
+            <div style={{ fontSize: 12, color: T.faint, marginTop: 10, lineHeight: 1.5 }}>
+              Not ranked here: {unranked.map(r => r.display_name).join(", ")} (no {metric === "goal_pct" ? "goal weight" : metric === "protein_rate" ? "protein goal" : "data"} set yet).
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="card-in" style={cardStyle}>
+        <div style={{ ...labelStyle, color: T.sub, marginBottom: 12 }}>Hall of fame · current leaders</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 8 }}>
+          {LB_METRICS.filter(x => x.key !== "overall").map(x => {
+            const lead = rows.filter(r => r[x.key] != null && r[x.key] > 0).sort((a, b) => b[x.key] - a[x.key])[0];
+            return (
+              <button key={x.key} onClick={() => { pick(x.key); window.scrollTo({ top: 0, behavior: "smooth" }); }}
+                style={{ display: "flex", gap: 10, alignItems: "center", textAlign: "left", background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 14, padding: 11, cursor: "pointer", color: T.text, minWidth: 0 }}>
+                {lead ? <Avatar r={lead} size={34} /> : <div style={{ width: 34, height: 34, borderRadius: "50%", background: "rgba(255,255,255,0.06)", flexShrink: 0 }} />}
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 11, color: "#FFD54A", fontWeight: 700 }}>{x.title}</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{lead ? lead.display_name : "Up for grabs"}</div>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       <div style={{ fontSize: 12, color: T.faint, lineHeight: 1.6, padding: "0 4px 8px" }}>
-        Everyone's stats refresh each time they open Deficit. No weights, food or calories eaten are ever shared. Manage your entry in Setup → Privacy & leaderboard.
+        Everyone's stats refresh each time they open Deficit. Holiday days don't break streaks. No weights, food or calories eaten are ever shared. Manage your entry in Setup → Privacy & leaderboard.
       </div>
     </>
   );
@@ -1379,14 +1510,15 @@ function Board({ summaries, weights, settings, net, protein, exercise, fetchDay 
   for (let w = 0; w < 104; w++) {
     const mon = weekStartFor(new Date());
     mon.setDate(mon.getDate() - w * 7);
-    let wNet = 0, wDays = 0, inProgress = false;
+    let wNet = 0, wDays = 0, wHols = 0, inProgress = false;
     for (let i = 0; i < 7; i++) {
       const d = new Date(mon); d.setDate(mon.getDate() + i);
       if (d > new Date()) { inProgress = true; break; }
       const s = summaries[keyFor(d)];
-      if (s) { wNet += (s.maint || settings.maintenance) + s.ex - s.in; wDays++; }
+      if (s && s.hol) wHols++;                                      // holiday days neither help nor hurt
+      else if (s) { wNet += (s.maint || settings.maintenance) + s.ex - s.in; wDays++; }
     }
-    if (wDays === 0) { if (w === 0) continue; else break; }        // unlogged week
+    if (wDays === 0) { if (w === 0 || wHols > 0) continue; else break; } // unlogged week breaks; all-holiday week is skipped
     const hit = wNet >= settings.target * wDays;
     if (hit) streak++;
     else if (w === 0 && inProgress) continue;                       // this week not finished — don't penalise
